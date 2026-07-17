@@ -341,39 +341,55 @@ def _log_thread_exception(args):
 threading.excepthook = _log_thread_exception
 
 
+_switch_request_queue = queue.Queue()
+
 def switch_audio():
-    """固有IDを用いた実態ベースのオーディオ切り替え"""
+    """ホットキーのコールバック本体。低レベルキーボードフックのコールバック
+    スレッドから直接呼ばれるため、ここでは絶対にブロックしてはいけない。
+    Windowsは低レベルフックの応答が遅い(既定で数秒程度)と、そのフックを
+    黙って無効化することがあり、以前はここでCOM/オーディオAPIを直接呼んで
+    いたため、まれに発生する遅延がきっかけでホットキーが無反応になる不具合
+    があった。実際の処理は全て別スレッド(_switch_worker)に投げ、ここでは
+    デバウンス判定とキューへの投入だけを行う。"""
     global last_switch_time
     current_time = time.time()
-    
+
     if current_time - last_switch_time < 0.6:
         return
     last_switch_time = current_time
 
-    dev_a, dev_b, _, _ = load_config()
-    device_dict, current_default = get_device_info()
-    
-    if not current_default:
-        target_display_name = dev_a
-    else:
-        if current_default == dev_a:
-            target_display_name = dev_b
-        else:
-            target_display_name = dev_a
-            
-    target_id = device_dict.get(target_display_name)
-    if target_id:
+    _switch_request_queue.put(None)
+
+def _switch_worker():
+    """switch_audio()から渡された切り替え要求を、フックコールバックの外側
+    (専用スレッド)で実際に処理する。COM初期化やSetDefaultDeviceがここで
+    多少時間を要しても、キーボードフックの応答性には影響しない。"""
+    while True:
+        _switch_request_queue.get()
         try:
-            ensure_com_initialized()
-            # roles=NoneでeConsole/eMultimedia/eCommunicationsの全ロールに設定（SoundVolumeViewの"all"相当）
-            AudioUtilities.SetDefaultDevice(target_id)
+            dev_a, dev_b, _, _ = load_config()
+            device_dict, current_default = get_device_info()
+
+            if not current_default:
+                target_display_name = dev_a
+            else:
+                if current_default == dev_a:
+                    target_display_name = dev_b
+                else:
+                    target_display_name = dev_a
+
+            target_id = device_dict.get(target_display_name)
+            if target_id:
+                try:
+                    ensure_com_initialized()
+                    # roles=NoneでeConsole/eMultimedia/eCommunicationsの全ロールに設定（SoundVolumeViewの"all"相当）
+                    AudioUtilities.SetDefaultDevice(target_id)
+                except Exception as e:
+                    log_error("SetDefaultDevice", e)
+                    continue
+                _toast_queue.put(target_display_name)
         except Exception as e:
-            log_error("SetDefaultDevice", e)
-            return
-        # トースト表示はTk常駐スレッド側で処理する（このハンドラは低レベル
-        # キーボードフックのコールバック内で呼ばれるため、ここでTk操作をせず
-        # スレッドセーフなキューに積むだけに留める）
-        _toast_queue.put(target_display_name)
+            log_error("switch_worker", e)
 
 def _rehook_watchdog(shortcut_key, interval_sec=300):
     """他アプリのグローバルフックとの競合でkeyboardライブラリの内部状態が
@@ -395,6 +411,7 @@ def start_backend():
     _, _, shortcut_key, _ = load_config()
     keyboard.add_hotkey(shortcut_key, switch_audio, trigger_on_release=False)
     threading.Thread(target=_rehook_watchdog, args=(shortcut_key,), daemon=True).start()
+    threading.Thread(target=_switch_worker, daemon=True).start()
 
     root = tk.Tk()
     root.withdraw()
