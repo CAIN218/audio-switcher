@@ -1,48 +1,48 @@
 # AudioSwitcher
 
-Windows用の常駐型オーディオ出力切り替えツールです。
-あらかじめ登録した2つの再生デバイス（例: スピーカーとヘッドホン）を、グローバルホットキー1つで即座に切り替えられます。
+A resident audio output switcher for Windows.
+Instantly toggle between two pre-registered playback devices (e.g. speakers and headphones) with a single global hotkey.
 
-- 切り替え時にはトースト通知で現在の出力先を表示
-- Windows起動時の自動起動に対応
-- 外部exe不要（Windows Core Audio APIを直接操作）
+- Shows a toast notification with the current output device on every switch
+- Supports auto-start on Windows boot
+- No external exe required (talks to the Windows Core Audio API directly)
 
-## ダウンロード
+## Download
 
-[Releases](../../releases) から最新の `AudioSwitcher.exe` をダウンロードしてください。インストール不要、exeを実行するだけで使えます。
+Grab the latest `AudioSwitcher.exe` from [Releases](../../releases). No installation needed — just run the exe.
 
-## 使い方
+## Usage
 
-### 1. 初回起動・設定
+### 1. First launch / setup
 
-`AudioSwitcher.exe` をダブルクリックすると設定画面が開きます。
+Double-click `AudioSwitcher.exe` to open the settings window.
 
-1. **DEVICE LAYER A** / **DEVICE LAYER B** で切り替え対象にしたい再生デバイスを2つ選択
-2. **GLOBAL TRIGGER HOTKEY** の欄をクリックし、使いたいキーの組み合わせを押して切り替えショートカットを設定（初期値: `ctrl+alt+a`）
-3. 「今すぐテスト切り替え」で動作確認
-4. Windows起動時に自動で立ち上げたい場合は **Start on boot** をON
-5. **Save & Run** で設定を保存してそのままバックグラウンド常駐開始（**Save only** は保存のみで起動しない）
+1. Pick the two playback devices you want to switch between under **DEVICE LAYER A** / **DEVICE LAYER B**
+2. Click the **GLOBAL TRIGGER HOTKEY** field and press the key combo you want to use (default: `ctrl+alt+a`)
+3. Use "Test switch now" to verify it works
+4. Turn on **Start on boot** if you want it to launch automatically with Windows
+5. **Save & Run** saves your settings and immediately starts running in the background (**Save only** just saves without launching)
 
-### 2. 通常使用
+### 2. Normal use
 
-常駐中はウィンドウは表示されません。設定したホットキーを押すたびに、デバイスA・Bの既定の再生デバイスが交互に切り替わり、画面右下にトースト通知が表示されます。
+While resident, no window is shown. Each time you press the configured hotkey, the default playback device toggles between Device A and Device B, and a toast notification appears in the bottom-right corner.
 
-### 3. 設定を変更したい場合
+### 3. Changing settings
 
-常駐中のAudioSwitcherを一度終了し、`AudioSwitcher.exe` を再度起動すると設定画面が開きます（多重起動防止のため、古いプロセスは自動的に終了します）。
+Quit the running AudioSwitcher and launch `AudioSwitcher.exe` again to reopen the settings window (any old instance is automatically terminated to prevent duplicates).
 
-### 4. 終了方法
+### 4. Quitting
 
-タスクマネージャーから `AudioSwitcher.exe` を終了してください。
+End `AudioSwitcher.exe` from Task Manager.
 
-## 設定ファイル
+## Config files
 
-exeと同じフォルダに以下のファイルが作成されます。
+These files are created next to the exe:
 
-- `app_config.txt` — デバイスA/B、ホットキー、自動起動設定
-- `error.log` — エラー発生時のログ（トラブル時の調査用）
+- `app_config.txt` — Device A/B, hotkey, and auto-start settings
+- `error.log` — Error log for troubleshooting
 
-## 開発者向け: ソースからのビルド
+## Building from source
 
 ```
 pip install -r requirements.txt
@@ -50,8 +50,8 @@ pip install pyinstaller
 pyinstaller --noconfirm AudioSwitcher.spec
 ```
 
-`dist/AudioSwitcher.exe` が生成されます。
+This produces `dist/AudioSwitcher.exe`.
 
-## 動作環境
+## Requirements
 
 - Windows 10 / 11
