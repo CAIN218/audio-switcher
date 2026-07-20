@@ -391,13 +391,25 @@ def _switch_worker():
         except Exception as e:
             log_error("switch_worker", e)
 
-def _rehook_watchdog(shortcut_key, interval_sec=300):
-    """他アプリのグローバルフックとの競合でkeyboardライブラリの内部状態が
-    ズレてホットキーが反応しなくなる既知の問題への対策。
-    定期的にフックを一旦解除して登録し直し、内部状態をリセットする。"""
+def _rehook_watchdog(shortcut_key, interval_sec=30):
+    """UACの同意プロンプトやロック画面(Secure Desktop)に切り替わっている間、
+    このプロセスの低レベルキーボードフックには何のイベントも届かない。
+    そのタイミングでたまたまctrl/altを押していると、対応するKEY_UPイベントが
+    永遠に届かず、keyboardライブラリ内部の「押されているキー」の記録
+    (_pressed_events等)にゴースト状態が残り続ける。以降そのホットキーの
+    組み合わせが二度と成立しなくなる(＝プロセスは動いているのにショート
+    カットだけ無反応になる)のはこれが原因。
+    unhook_all()はこの内部状態(_pressed_events等)には触れないため無意味で、
+    ここで明示的にクリアしてゴーストを解消する。"""
     while True:
         time.sleep(interval_sec)
         try:
+            with keyboard._pressed_events_lock:
+                keyboard._pressed_events.clear()
+            keyboard._logically_pressed_keys.clear()
+            keyboard._listener.active_modifiers.clear()
+            keyboard._listener.modifier_states.clear()
+
             keyboard.unhook_all()
             keyboard.add_hotkey(shortcut_key, switch_audio, trigger_on_release=False)
         except Exception as e:
