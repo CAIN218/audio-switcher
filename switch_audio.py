@@ -9,6 +9,9 @@ import warnings
 import threading
 import queue
 import ctypes
+import json
+import urllib.request
+import webbrowser
 import winshell
 from win32com.client import Dispatch
 
@@ -27,6 +30,9 @@ else:
 
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
+
+__version__ = "1.0.4"
+GITHUB_REPO = "CAIN218/audio-switcher"
 
 last_switch_time = 0
 _com_thread_local = threading.local()
@@ -239,6 +245,8 @@ class _ToastManager:
         self.canvas = None
         self.fade_job = None
         self.current_alpha = 0.0
+        self.on_click = None
+        self._hold_ms = 2600
 
     def _ensure_window(self):
         if self.window is not None:
@@ -255,6 +263,8 @@ class _ToastManager:
         canvas = tk.Canvas(toast, width=self.WIDTH, height=self.HEIGHT,
                             bg=transparent_key, highlightthickness=0)
         canvas.pack(fill="both", expand=True)
+        # クリック可能なトースト(アップデート通知など)用。show()側で都度差し替える。
+        canvas.bind("<Button-1>", lambda e: self.on_click() if self.on_click else None)
         toast.withdraw()
 
         self.window = toast
@@ -293,7 +303,38 @@ class _ToastManager:
         display_text = device_name if len(device_name) <= 34 else device_name[:32] + "..."
         canvas.create_text(22, 44, anchor="w", text=display_text,
                             fill=COLOR_TEXT_MAIN, font=("Segoe UI", 10, "bold"))
+        canvas.configure(cursor="")
 
+        self.on_click = None
+        self._hold_ms = 2600
+        self._place_bottom_right()
+        self.window.deiconify()
+        self._place_bottom_right()
+        self.current_alpha = 0.0
+        self._fade_in()
+
+    def show_update_available(self, latest_tag, release_url):
+        """新しいバージョンが見つかった時の控えめな通知。クリックでリリース
+        ページを開く。頻繁に出るものではないので、通常のトーストより長めに
+        表示したままにする。"""
+        self._ensure_window()
+        if self.fade_job:
+            self.root.after_cancel(self.fade_job)
+            self.fade_job = None
+
+        canvas = self.canvas
+        canvas.delete("all")
+        _rounded_rect(canvas, 1, 1, self.WIDTH - 1, self.HEIGHT - 1, 16,
+                      fill=COLOR_PANEL, outline=COLOR_BORDER, width=1)
+        canvas.create_rectangle(0, 12, 4, self.HEIGHT - 12, fill=COLOR_ACCENT, outline="")
+        canvas.create_text(22, 22, anchor="w", text="UPDATE AVAILABLE",
+                            fill=COLOR_ACCENT, font=("Segoe UI", 8, "bold"))
+        canvas.create_text(22, 44, anchor="w", text=f"{latest_tag} — click to view",
+                            fill=COLOR_TEXT_MAIN, font=("Segoe UI", 10, "bold"))
+        canvas.configure(cursor="hand2")
+
+        self.on_click = lambda: webbrowser.open(release_url)
+        self._hold_ms = 8000
         self._place_bottom_right()
         self.window.deiconify()
         self._place_bottom_right()
@@ -306,7 +347,7 @@ class _ToastManager:
             self.window.attributes("-alpha", min(self.current_alpha, 0.96))
             self.fade_job = self.root.after(15, self._fade_in)
         else:
-            self.fade_job = self.root.after(2600, self._fade_out)
+            self.fade_job = self.root.after(self._hold_ms, self._fade_out)
 
     def _fade_out(self):
         if self.current_alpha > 0.0:
@@ -339,6 +380,42 @@ def _log_thread_exception(args):
 
 
 threading.excepthook = _log_thread_exception
+
+
+def _parse_version(tag):
+    """'v1.2.3' -> (1, 2, 3)。数値以外が混ざっていても比較不能で落ちない
+    ように、パースできない要素は0として扱う。"""
+    parts = []
+    for p in tag.lstrip("vV").split("."):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+_update_queue = queue.Queue()
+
+def _update_check_loop():
+    """1日1回、GitHubの最新リリースを確認する。バックグラウンドの常駐
+    ツールなので、失敗(オフライン等)は完全に握りつぶし通常動作に一切
+    影響させない。新しいバージョンが見つかった時だけ、トースト表示用の
+    キューに積んでメインスレッド側(poll_toast_queue)に伝える。"""
+    while True:
+        try:
+            req = urllib.request.Request(
+                f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "AudioSwitcher-update-check"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            latest_tag = data.get("tag_name", "")
+            release_url = data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
+            if latest_tag and _parse_version(latest_tag) > _parse_version(__version__):
+                _update_queue.put((latest_tag, release_url))
+        except Exception as e:
+            log_error("update_check", e)
+        time.sleep(24 * 60 * 60)
 
 
 _switch_request_queue = queue.Queue()
@@ -424,6 +501,7 @@ def start_backend():
     keyboard.add_hotkey(shortcut_key, switch_audio, trigger_on_release=False)
     threading.Thread(target=_rehook_watchdog, args=(shortcut_key,), daemon=True).start()
     threading.Thread(target=_switch_worker, daemon=True).start()
+    threading.Thread(target=_update_check_loop, daemon=True).start()
 
     root = tk.Tk()
     root.withdraw()
@@ -439,6 +517,16 @@ def start_backend():
             pass
         except Exception as e:
             log_error("poll_toast_queue", e)
+
+        try:
+            while True:
+                latest_tag, release_url = _update_queue.get_nowait()
+                toast_manager.show_update_available(latest_tag, release_url)
+        except queue.Empty:
+            pass
+        except Exception as e:
+            log_error("poll_update_queue", e)
+
         root.after(50, poll_toast_queue)
 
     root.after(50, poll_toast_queue)
