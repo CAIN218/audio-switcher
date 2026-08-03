@@ -31,7 +31,7 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -92,6 +92,22 @@ def ensure_com_initialized():
             pass  # 既に初期化済みのスレッド
         _com_thread_local.initialized = True
 
+def enable_dpi_awareness():
+    """Per-Monitor DPIを意識させる。これを呼ばないとGetCursorPos/
+    MonitorFromPointがDPI仮想化された座標を返すことがあり、マルチ
+    モニター環境(特に解像度やDPIが混在する構成)でトーストやオーバーレイ
+    が実際のカーソル位置とズレた場所(最悪、どのモニターにも表示されない
+    座標)に出てしまう。Luminaで同じ症状(パネルが意図しない位置に出る)
+    を修正した時と同じ対策。PyInstaller化した場合マニフェストでのDPI宣言
+    が無いため、コード側で明示する必要がある。"""
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception as e:
+            log_error("enable_dpi_awareness", e)
+
 def kill_previous_instances():
     """裏で既に動いている古いAudioSwitcherのプロセスをすべて安全に終了させる"""
     try:
@@ -145,10 +161,12 @@ def get_device_info():
         return {}, None
 
 def load_config():
-    """設定ファイルの読み込み。5,6行目(複数デバイス切り替えオーバーレイの
-    ホットキーと有効/無効)は後から追加した項目なので、無い場合は
-    デフォルト値にフォールバックし、古い4行だけの設定ファイルもそのまま
-    読み込めるようにしている。"""
+    """設定ファイルの読み込み。5〜7行目(複数デバイス切り替えオーバーレイの
+    ホットキー・有効/無効、およびA/Bトグル自体の有効/無効)は後から追加した
+    項目なので、無い場合はデフォルト値にフォールバックし、古い設定ファイル
+    もそのまま読み込めるようにしている。A/Bトグルは元々常に有効だった機能
+    なので、値が無い場合のデフォルトは"1"(有効)にして既存ユーザーの挙動を
+    変えないようにしている。"""
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             lines = f.read().splitlines()
@@ -158,13 +176,14 @@ def load_config():
         startup_val = lines[3] if len(lines) > 3 else "0"
         overlay_key = lines[4] if len(lines) > 4 else DEFAULT_OVERLAY_HOTKEY
         overlay_enabled = lines[5] if len(lines) > 5 else "0"
-        return dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled
-    return "", "", "ctrl+alt+a", "0", DEFAULT_OVERLAY_HOTKEY, "0"
+        ab_enabled = lines[6] if len(lines) > 6 else "1"
+        return dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled
+    return "", "", "ctrl+alt+a", "0", DEFAULT_OVERLAY_HOTKEY, "0", "1"
 
-def save_config(dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled):
+def save_config(dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled):
     """設定ファイルの保存とスタートアップ制御"""
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        f.write(f"{dev_a}\n{dev_b}\n{key}\n{startup_val}\n{overlay_key}\n{overlay_enabled}")
+        f.write(f"{dev_a}\n{dev_b}\n{key}\n{startup_val}\n{overlay_key}\n{overlay_enabled}\n{ab_enabled}")
     manage_startup(startup_val)
 
 def manage_startup(startup_val):
@@ -670,7 +689,7 @@ def _switch_worker():
     while True:
         _switch_request_queue.get()
         try:
-            dev_a, dev_b, _, _, _, _ = load_config()
+            dev_a, dev_b, _, _, _, _, _ = load_config()
             device_dict, current_default = get_device_info()
 
             if not current_default:
@@ -759,9 +778,11 @@ def start_backend():
     """バックグラウンドでのキーボード監視 + 常駐トースト用Tkループの開始
     Tclインタプリタを1つだけ常駐させ、切り替えのたびに使い回すことで
     インタプリタの生成・破棄によるメモリ増加を防ぐ。"""
-    _, _, shortcut_key, _, overlay_key, overlay_enabled = load_config()
+    _, _, shortcut_key, _, overlay_key, overlay_enabled, ab_enabled = load_config()
 
-    hotkeys = [(shortcut_key, switch_audio)]
+    hotkeys = []
+    if ab_enabled == "1" and shortcut_key:
+        hotkeys.append((shortcut_key, switch_audio))
     if overlay_enabled == "1" and overlay_key:
         hotkeys.append((overlay_key, open_device_overlay))
 
@@ -822,9 +843,11 @@ def start_backend():
 
 def open_setting_window():
     """2重起動防止・ハイブリッドスタートアップ自動生成付き設定UI。
-    General(既存のA/Bトグル)とMulti-Device(3台以上から選ぶオーバーレイ)を
+    A/B SWITCH(既存のA/Bトグル)とMulti-Device(3台以上から選ぶオーバーレイ)を
     タブで分けている。ひとつの画面に全部詰め込むとごちゃつくため。"""
     import customtkinter as ctk  # 設定画面を開く時だけ読み込む（バックグラウンド常駐時は不要なため）
+
+    is_first_run = not os.path.exists(CONFIG_FILE)
 
     kill_previous_instances()
 
@@ -840,14 +863,14 @@ def open_setting_window():
         )
         devices = ["Speakers", "Headphones"]
 
-    saved_a, saved_b, saved_key, saved_startup, saved_overlay_key, saved_overlay_enabled = load_config()
+    saved_a, saved_b, saved_key, saved_startup, saved_overlay_key, saved_overlay_enabled, saved_ab_enabled = load_config()
     devices_b_options = ["Select device..."] + devices
 
     ctk.set_appearance_mode("dark")
 
     root = ctk.CTk(fg_color=COLOR_BG)
     root.title("AudioSwitcher")
-    root.geometry("560x680")
+    root.geometry("560x600")
     root.resizable(False, False)
     root.attributes("-topmost", True)
     if os.path.exists(ICON_PATH):
@@ -929,35 +952,56 @@ def open_setting_window():
         entry.bind("<KeyPress>", on_key_press)
         entry.bind("<KeyRelease>", on_key_release)
 
-        return key_box, (lambda: rec["value"])
+        def set_enabled(enabled):
+            """機能トグルがOFFの時、グレーアウトして触れないようにする"""
+            if enabled:
+                rec["saved"] = rec["value"]
+                entry.configure(state="readonly", text_color=COLOR_TEXT_MAIN)
+                key_box.configure(border_color=COLOR_BORDER)
+            else:
+                rec["recording"] = False
+                entry.configure(state="disabled", text_color=COLOR_TEXT_FAINT)
+                key_box.configure(border_color=COLOR_BORDER)
+
+        return key_box, (lambda: rec["value"]), set_enabled
 
     # ヘッダー
     header = ctk.CTkFrame(root, fg_color="transparent")
-    header.pack(fill="x", padx=30, pady=(30, 18))
-    ctk.CTkLabel(header, text="AudioSwitcher", font=FONT_DISPLAY,
-                 text_color=COLOR_TEXT_MAIN, anchor="w").pack(fill="x")
+    header.pack(fill="x", padx=30, pady=(22, 14))
+    title_row = ctk.CTkFrame(header, fg_color="transparent")
+    title_row.pack(fill="x")
+    ctk.CTkLabel(title_row, text="AudioSwitcher", font=FONT_DISPLAY,
+                 text_color=COLOR_TEXT_MAIN, anchor="w").pack(side="left")
+    help_button = ctk.CTkButton(
+        title_row, text="?", command=lambda: show_onboarding(),
+        width=26, height=26, corner_radius=13,
+        fg_color=COLOR_INPUT, hover_color=COLOR_ACCENT_DIM, text_color=COLOR_TEXT_SUB,
+        border_width=1, border_color=COLOR_BORDER, font=("Segoe UI", 10, "bold"),
+    )
+    help_button.pack(side="right")
     ctk.CTkLabel(header, text="信号の経路（ルーティング）をワンショートカットで切り替える。",
                  font=FONT_BODY, text_color=COLOR_TEXT_SUB, anchor="w").pack(fill="x", pady=(2, 0))
 
     tabview = ctk.CTkTabview(
-        root, fg_color=COLOR_PANEL, border_width=1, border_color=COLOR_BORDER, corner_radius=14,
+        root, width=1, height=1, fg_color=COLOR_PANEL, border_width=1, border_color=COLOR_BORDER, corner_radius=14,
         segmented_button_fg_color=COLOR_INPUT, segmented_button_selected_color=COLOR_ACCENT,
         segmented_button_selected_hover_color=COLOR_ACCENT_HOVER,
-        segmented_button_unselected_color=COLOR_INPUT, segmented_button_unselected_hover_color=COLOR_INPUT,
+        segmented_button_unselected_color=COLOR_INPUT, segmented_button_unselected_hover_color=COLOR_ACCENT_DIM,
+        segmented_button_font=("Segoe UI", 11, "bold"),
         text_color=COLOR_TEXT_MAIN, text_color_disabled=COLOR_TEXT_FAINT,
     )
-    tabview.pack(fill="both", expand=True, padx=30, pady=(0, 18))
-    tab_general = tabview.add("General")
-    tab_multi = tabview.add("Multi-Device")
+    tabview.pack(fill="both", expand=True, padx=30, pady=(0, 14))
+    tab_general = tabview.add("A/B SWITCH")
+    tab_multi = tabview.add("MULTI-DEVICE")
 
     # ルーティング・インジケーター（現在どちらのレイヤーがアクティブかをパッチベイ風に表示）
     indicator_panel = ctk.CTkFrame(tab_general, fg_color=COLOR_PANEL, corner_radius=14,
                                     border_width=0)
-    indicator_panel.pack(fill="x", pady=(4, 14))
+    indicator_panel.pack(fill="x", pady=(2, 10))
 
-    indicator_canvas = tk.Canvas(indicator_panel, width=220, height=56,
+    indicator_canvas = tk.Canvas(indicator_panel, width=220, height=52,
                                   bg=COLOR_PANEL, highlightthickness=0)
-    indicator_canvas.pack(pady=(14, 4))
+    indicator_canvas.pack(pady=(10, 2))
 
     status_label = ctk.CTkLabel(indicator_panel, font=("Segoe UI", 9), text_color=COLOR_TEXT_SUB)
     status_label.pack(pady=(0, 2))
@@ -1006,34 +1050,44 @@ def open_setting_window():
         border_width=1, border_color=COLOR_ACCENT_DIM, corner_radius=8,
         font=("Segoe UI", 9, "bold"), height=28,
     )
-    test_button.pack(pady=(2, 14))
+    test_button.pack(pady=(2, 10))
 
     # デバイス設定カード
     container = ctk.CTkFrame(tab_general, fg_color="transparent")
     container.pack(fill="both", expand=True)
 
     def section_label(parent, text):
-        ctk.CTkLabel(parent, text=text, font=FONT_LABEL, text_color=COLOR_TEXT_SUB,
-                     anchor="w").pack(fill="x", padx=24, pady=(18, 6))
+        lbl = ctk.CTkLabel(parent, text=text, font=FONT_LABEL, text_color=COLOR_TEXT_SUB, anchor="w")
+        lbl.pack(fill="x", padx=24, pady=(10, 4))
+        return lbl
+
+    ab_enabled_var = tk.StringVar(value=saved_ab_enabled)
+    switch_ab = ctk.CTkSwitch(
+        container, text="Enable A/B switch", variable=ab_enabled_var, onvalue="1", offvalue="0",
+        font=FONT_BODY, text_color=COLOR_TEXT_SUB,
+        fg_color=COLOR_INPUT, progress_color=COLOR_ACCENT,
+        button_color=COLOR_TEXT_MAIN, button_hover_color=COLOR_ACCENT_HOVER,
+    )
+    switch_ab.pack(anchor="w", padx=24, pady=(0, 8))
 
     combo_kwargs = dict(
         state="readonly", fg_color=COLOR_INPUT, border_color=COLOR_BORDER, border_width=1,
         button_color=COLOR_INPUT, button_hover_color=COLOR_ACCENT_DIM,
         dropdown_fg_color=COLOR_INPUT, dropdown_text_color=COLOR_TEXT_MAIN,
         dropdown_hover_color=COLOR_ACCENT_DIM, text_color=COLOR_TEXT_MAIN,
-        corner_radius=8, height=36,
+        corner_radius=8, height=34,
     )
 
-    section_label(container, "DEVICE LAYER A")
+    label_a = section_label(container, "DEVICE LAYER A")
     combo_a = ctk.CTkComboBox(container, values=devices, **combo_kwargs)
-    combo_a.pack(fill="x", padx=24, pady=(0, 16))
+    combo_a.pack(fill="x", padx=24, pady=(0, 10))
     if saved_a in devices: combo_a.set(saved_a)
     elif current_default in devices: combo_a.set(current_default)
     else: combo_a.set(devices[0])
 
-    section_label(container, "DEVICE LAYER B")
+    label_b = section_label(container, "DEVICE LAYER B")
     combo_b = ctk.CTkComboBox(container, values=devices_b_options, **combo_kwargs)
-    combo_b.pack(fill="x", padx=24, pady=(0, 16))
+    combo_b.pack(fill="x", padx=24, pady=(0, 10))
     if saved_b in devices_b_options and saved_b != "Select device...": combo_b.set(saved_b)
     else: combo_b.set(devices_b_options[0])
 
@@ -1042,13 +1096,26 @@ def open_setting_window():
     refresh_indicator()
 
     # ホットキー
-    section_label(container, "GLOBAL TRIGGER HOTKEY")
-    key_box, get_shortcut = make_hotkey_recorder(container, saved_key)
-    key_box.pack(fill="x", padx=24, pady=(0, 8))
+    label_hotkey = section_label(container, "GLOBAL TRIGGER HOTKEY")
+    key_box, get_shortcut, set_key_enabled = make_hotkey_recorder(container, saved_key)
+    key_box.pack(fill="x", padx=24, pady=(0, 6))
 
     ctk.CTkLabel(container, text="クリックしてから新しいキーの組み合わせを押すと変更できます",
                  font=("Segoe UI", 8), text_color=COLOR_TEXT_FAINT, anchor="w").pack(
-        fill="x", padx=24, pady=(0, 14))
+        fill="x", padx=24, pady=(0, 8))
+
+    def apply_ab_enabled_style(*_):
+        enabled = ab_enabled_var.get() == "1"
+        combo_a.configure(state=("readonly" if enabled else "disabled"))
+        combo_b.configure(state=("readonly" if enabled else "disabled"))
+        set_key_enabled(enabled)
+        dim = COLOR_TEXT_SUB if enabled else COLOR_TEXT_FAINT
+        label_a.configure(text_color=dim)
+        label_b.configure(text_color=dim)
+        label_hotkey.configure(text_color=dim)
+
+    switch_ab.configure(command=apply_ab_enabled_style)
+    apply_ab_enabled_style()
 
     # ---- Multi-Deviceタブ: 3台以上の出力先から選ぶオーバーレイの設定 ----
     container2 = ctk.CTkFrame(tab_multi, fg_color="transparent")
@@ -1058,7 +1125,7 @@ def open_setting_window():
         container2,
         text="ホットキーを押すと、今つながっている出力デバイスが画面中央に一覧表示され、\nそこから選んで切り替えられます。",
         font=FONT_BODY, text_color=COLOR_TEXT_SUB, justify="left", anchor="w"
-    ).pack(fill="x", pady=(16, 14))
+    ).pack(fill="x", padx=24, pady=(10, 10))
 
     overlay_enabled_var = tk.StringVar(value=saved_overlay_enabled)
     switch_overlay = ctk.CTkSwitch(
@@ -1067,29 +1134,37 @@ def open_setting_window():
         fg_color=COLOR_INPUT, progress_color=COLOR_ACCENT,
         button_color=COLOR_TEXT_MAIN, button_hover_color=COLOR_ACCENT_HOVER,
     )
-    switch_overlay.pack(anchor="w", pady=(0, 18))
+    switch_overlay.pack(anchor="w", padx=24, pady=(0, 10))
 
-    section_label(container2, "OVERLAY HOTKEY")
-    overlay_key_box, get_overlay_shortcut = make_hotkey_recorder(container2, saved_overlay_key)
-    overlay_key_box.pack(fill="x", padx=24, pady=(0, 8))
+    label_overlay_key = section_label(container2, "OVERLAY HOTKEY")
+    overlay_key_box, get_overlay_shortcut, set_overlay_key_enabled = make_hotkey_recorder(container2, saved_overlay_key)
+    overlay_key_box.pack(fill="x", padx=24, pady=(0, 6))
     ctk.CTkLabel(container2, text="クリックしてから新しいキーの組み合わせを押すと変更できます",
                  font=("Segoe UI", 8), text_color=COLOR_TEXT_FAINT, anchor="w").pack(
-        fill="x", padx=24, pady=(0, 14))
+        fill="x", padx=24, pady=(0, 8))
+
+    def apply_overlay_enabled_style(*_):
+        enabled = overlay_enabled_var.get() == "1"
+        set_overlay_key_enabled(enabled)
+        label_overlay_key.configure(text_color=(COLOR_TEXT_SUB if enabled else COLOR_TEXT_FAINT))
+
+    switch_overlay.configure(command=apply_overlay_enabled_style)
+    apply_overlay_enabled_style()
 
     section_label(container2, f"DETECTED DEVICES ({len(devices)})")
     device_list_frame = ctk.CTkFrame(container2, fg_color=COLOR_INPUT, corner_radius=8,
                                       border_width=1, border_color=COLOR_BORDER)
-    device_list_frame.pack(fill="x", padx=24, pady=(0, 10))
+    device_list_frame.pack(fill="x", padx=24, pady=(0, 8))
     for name in devices:
         row_text = f"● {name}" if name == current_default else name
         ctk.CTkLabel(
             device_list_frame, text=row_text, font=("Segoe UI", 9), anchor="w",
             text_color=(COLOR_ACCENT if name == current_default else COLOR_TEXT_SUB)
-        ).pack(fill="x", padx=14, pady=4)
+        ).pack(fill="x", padx=14, pady=3)
 
     # ボトム
     bottom_bar = ctk.CTkFrame(root, fg_color="transparent")
-    bottom_bar.pack(fill="x", padx=30, pady=(0, 30))
+    bottom_bar.pack(fill="x", padx=30, pady=(0, 22))
 
     startup_var = tk.StringVar(value=saved_startup)
     switch_startup = ctk.CTkSwitch(
@@ -1104,11 +1179,11 @@ def open_setting_window():
     btn_frame.pack(side="right")
 
     def on_save_only():
-        if combo_b.get() == "Select device...":
+        if ab_enabled_var.get() == "1" and combo_b.get() == "Select device...":
             tk.messagebox.showwarning("Routing Incomplete", "Please select a valid target for Device Layer B.")
             return
         save_config(combo_a.get(), combo_b.get(), get_shortcut(), startup_var.get(),
-                    get_overlay_shortcut(), overlay_enabled_var.get())
+                    get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get())
         root.destroy()
         sys.exit(0)
 
@@ -1121,11 +1196,11 @@ def open_setting_window():
     btn_save_only.pack(side="left", padx=(0, 10))
 
     def on_save_and_run():
-        if combo_b.get() == "Select device...":
+        if ab_enabled_var.get() == "1" and combo_b.get() == "Select device...":
             tk.messagebox.showwarning("Routing Incomplete", "Please select a valid target for Device Layer B.")
             return
         save_config(combo_a.get(), combo_b.get(), get_shortcut(), startup_var.get(),
-                    get_overlay_shortcut(), overlay_enabled_var.get())
+                    get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get())
         root.destroy()
         start_backend()
 
@@ -1136,9 +1211,621 @@ def open_setting_window():
     )
     btn_save_run.pack(side="right")
 
+    # ウィンドウ高さは中身の実測サイズに合わせて自動調整する。CTkTabviewを
+    # 導入したことで固定の見積もり値だと下端(ボトムバー)が切れることが
+    # あったため、両タブの中身を組み終えたこのタイミングで測り直す。
+    root.update_idletasks()
+    required_height = root.winfo_reqheight() + 12
+    root.geometry(f"560x{required_height}")
+
+    # ---- 機能紹介ウォークスルー。初回起動時に自動で出るほか、ヘッダーの
+    # ヘルプボタン(?)からいつでも呼び出せる。実際のトースト/オーバーレイを
+    # その場で呼び出す方式は、モニター判定の問題(トーストが別モニターに
+    # 出て見えない等)に左右されやすいため、ウィザード自身のCanvas上だけで
+    # 完結する「キー操作のイラストアニメ」にしている
+    # (実機・実際のウィンドウ位置に依存しない)。----
+    def show_onboarding():
+        wiz = {"step": 0, "window": None}
+
+        def draw_keycaps(canvas, labels, cx, cy):
+            """CTRL/ALT/Aのようなキーキャップ列を描き、後で押下アニメーション
+            させるための(rect_id, text_id)のリストを返す。"""
+            widths = [46 if len(l) <= 4 else 30 for l in labels]
+            gap = 8
+            total_w = sum(widths) + gap * (len(labels) - 1)
+            x = cx - total_w / 2
+            items = []
+            for label, w in zip(labels, widths):
+                rect = _rounded_rect(canvas, x, cy - 15, x + w, cy + 15, 6,
+                                      fill=COLOR_INPUT, outline=COLOR_BORDER, width=1)
+                text = canvas.create_text(x + w / 2, cy, text=label,
+                                           fill=COLOR_TEXT_MAIN, font=("Segoe UI", 9, "bold"))
+                items.append((rect, text))
+                x += w + gap
+            return items
+
+        def _lerp_hex(c1, c2, t):
+            """2つの#rrggbb色をtで線形補間する。トグルの色変化やクリック時の
+            フラッシュを、パキッと切り替わるのではなく滑らかに見せるために使う。"""
+            t = max(0.0, min(1.0, t))
+            r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+            r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+            return f"#{round(r1+(r2-r1)*t):02x}{round(g1+(g2-g1)*t):02x}{round(b1+(b2-b1)*t):02x}"
+
+        def tween(canvas, duration_ms, on_tick, on_done=None):
+            """0〜1のイーズアウトされた進捗を毎フレームon_tickに渡す、
+            汎用のなめらかアニメーション駆動役。カーソル移動・色変化・
+            スライドインなど、このウィザードのアニメーション全般で使う。"""
+            steps = max(1, duration_ms // 15)
+
+            def frame(i):
+                if not canvas.winfo_exists():
+                    return
+                t = i / steps
+                eased = 1 - (1 - t) ** 3
+                on_tick(eased)
+                if i < steps:
+                    canvas.after(15, lambda: frame(i + 1))
+                elif on_done:
+                    on_done()
+
+            frame(0)
+
+        def make_cursor(canvas):
+            """Windowsの標準矢印カーソルに近い形・配色(白地に黒縁)のアイコン。
+            set_posで即座に配置、move_toでなめらかに(tween経由で)移動できる。"""
+            cur = canvas.create_polygon(
+                0, 0, 0, 19, 5, 15, 8, 21.5, 11.5, 20, 7.5, 14.5, 13, 14.5,
+                fill="#ffffff", outline="#000000", width=1.2,
+            )
+            canvas.itemconfig(cur, state="hidden")
+
+            def set_pos(x, y):
+                canvas.coords(
+                    cur,
+                    x, y, x, y + 19, x + 5, y + 15, x + 8, y + 21.5,
+                    x + 11.5, y + 20, x + 7.5, y + 14.5, x + 13, y + 14.5,
+                )
+                # ドロップダウンなど、カーソル生成後に新しく描かれる要素が
+                # 上に重なって隠してしまわないよう、動くたびに最前面へ。
+                canvas.tag_raise(cur)
+
+            def move_to(from_xy, to_xy, duration_ms, on_done=None):
+                if not canvas.winfo_exists():
+                    return
+                canvas.itemconfig(cur, state="normal")
+
+                def on_tick(e):
+                    set_pos(from_xy[0] + (to_xy[0] - from_xy[0]) * e,
+                            from_xy[1] + (to_xy[1] - from_xy[1]) * e)
+
+                tween(canvas, duration_ms, on_tick, on_done)
+
+            def hide():
+                if canvas.winfo_exists():
+                    canvas.itemconfig(cur, state="hidden")
+
+            return set_pos, move_to, hide
+
+        def make_settings_illustration(canvas):
+            """ステップ1: 実際の設定画面のミニチュアの上で、マウスカーソルが
+            なめらかに動きながら「デバイスを選ぶ→ホットキーを登録する→
+            Multi-Deviceタブに切り替える→有効化する→保存する」という一連の
+            操作を実演する。使った時どうなるかではなく、この設定画面自体を
+            どう操作するかを見せるためのイラスト。"""
+            W = 420
+            cx = W / 2
+
+            tab_w, tab_h, tab_gap = 150, 22, 6
+            tx0 = cx - (tab_w * 2 + tab_gap) / 2
+            tab_ab = _rounded_rect(canvas, tx0, 8, tx0 + tab_w, 8 + tab_h, 6, fill=COLOR_ACCENT, outline="")
+            canvas.create_text(tx0 + tab_w / 2, 8 + tab_h / 2, text="A/B SWITCH",
+                                fill=COLOR_BG, font=("Segoe UI", 8, "bold"))
+            tab_multi = _rounded_rect(canvas, tx0 + tab_w + tab_gap, 8, tx0 + tab_w * 2 + tab_gap, 8 + tab_h, 6,
+                                       fill=COLOR_INPUT, outline="")
+            tab_multi_text = canvas.create_text(tx0 + tab_w + tab_gap + tab_w / 2, 8 + tab_h / 2, text="MULTI-DEVICE",
+                                                 fill=COLOR_TEXT_SUB, font=("Segoe UI", 8, "bold"))
+
+            _rounded_rect(canvas, 10, 36, W - 10, 250, 12, fill=COLOR_PANEL, outline=COLOR_BORDER, width=1)
+
+            def field(label_text, y, is_combo=False, placeholder="Select device..."):
+                lbl = canvas.create_text(28, y, anchor="w", text=label_text,
+                                          fill=COLOR_TEXT_SUB, font=("Segoe UI", 8, "bold"))
+                box = _rounded_rect(canvas, 28, y + 8, W - 28, y + 34, 6,
+                                     fill=COLOR_INPUT, outline=COLOR_BORDER, width=1)
+                box_text = canvas.create_text(40, y + 21, anchor="w", text=placeholder,
+                                               fill=COLOR_TEXT_FAINT, font=("Segoe UI", 9))
+                items = [lbl, box, box_text]
+                if is_combo:
+                    caret = canvas.create_text(W - 40, y + 21, text="▾", fill=COLOR_TEXT_SUB, font=("Segoe UI", 9))
+                    items.append(caret)
+                return items, box_text, (28, y + 8, W - 28, y + 34)
+
+            ab_items_a, box_text_a, box_a_coords = field("DEVICE LAYER A", 50, is_combo=True)
+            ab_items_b, box_text_b, box_b_coords = field("DEVICE LAYER B", 96, is_combo=True)
+            ab_items_key, box_text_key, box_key_coords = field("GLOBAL TRIGGER HOTKEY", 142, placeholder="ctrl+alt+a")
+            box_a = ab_items_a[1]
+            box_b = ab_items_b[1]
+            box_key = ab_items_key[1]
+            canvas.itemconfig(box_text_key, fill=COLOR_TEXT_MAIN, font=("Segoe UI", 9, "bold"))
+            ab_group = ab_items_a + ab_items_b + ab_items_key
+
+            toggle_track = _rounded_rect(canvas, 28, 54, 64, 70, 8, fill=COLOR_INPUT, outline=COLOR_BORDER, width=1)
+            toggle_knob = canvas.create_oval(29, 55, 43, 69, fill=COLOR_TEXT_MAIN, outline="")
+            toggle_label = canvas.create_text(72, 62, anchor="w", text="Enable device-select overlay",
+                                               fill=COLOR_TEXT_SUB, font=("Segoe UI", 8))
+            okey_items, box_text_okey, box_okey_coords = field("OVERLAY HOTKEY", 96, placeholder="ctrl+alt+s")
+            box_okey = okey_items[1]
+            canvas.itemconfig(box_text_okey, fill=COLOR_TEXT_MAIN, font=("Segoe UI", 9, "bold"))
+            multi_group = [toggle_track, toggle_knob, toggle_label] + okey_items
+            for item in multi_group:
+                canvas.itemconfig(item, state="hidden")
+
+            btn = _rounded_rect(canvas, W - 130, 216, W - 28, 244, 8, fill=COLOR_ACCENT, outline="")
+            canvas.create_text(W - 79, 230, text="Save & Run", fill=COLOR_BG, font=("Segoe UI", 9, "bold"))
+
+            set_cursor, move_cursor, hide_cursor = make_cursor(canvas)
+            pos = {"xy": (W + 20, -10)}
+
+            def flash(item, base, accent):
+                def on_tick(e):
+                    if not canvas.winfo_exists():
+                        return
+                    ratio = e * 2 if e < 0.5 else (1 - e) * 2
+                    canvas.itemconfig(item, fill=_lerp_hex(base, accent, ratio))
+                tween(canvas, 300, on_tick)
+
+            def go(target_xy, on_done):
+                move_cursor(pos["xy"], target_xy, 420, on_done)
+                pos["xy"] = target_xy
+
+            def open_dropdown_and_select(box_coords, box_text_item, options, choice_index, on_done):
+                """実際のCTkComboBoxと同じく、枠をクリック→プルダウンが
+                現れる→カーソルが降りて選択肢をクリック→枠の表示が更新される、
+                という一連の操作をなめらかに実演する。"""
+                x1, y1, x2, y2 = box_coords
+                row_h = 24
+                dd_top = y2 + 3
+                dd_h = row_h * len(options) + 6
+                dd_panel = _rounded_rect(canvas, x1, dd_top, x2, dd_top + dd_h, 6,
+                                          fill=COLOR_INPUT, outline=COLOR_BORDER, width=1)
+                dd_items = [dd_panel]
+                dd_rows = []
+                for i, opt in enumerate(options):
+                    ry = dd_top + 3 + i * row_h
+                    row_bg = canvas.create_rectangle(x1 + 2, ry, x2 - 2, ry + row_h - 2, fill=COLOR_INPUT, outline="")
+                    row_text = canvas.create_text(x1 + 14, ry + (row_h - 2) / 2, anchor="w", text=opt,
+                                                   fill=COLOR_TEXT_MAIN, font=("Segoe UI", 9))
+                    dd_rows.append((row_bg, row_text))
+                    dd_items.extend([row_bg, row_text])
+
+                target_row_bg, _ = dd_rows[choice_index]
+                target_xy = (x1 + 20, dd_top + 3 + choice_index * row_h + (row_h - 2) / 2 - 8)
+
+                def highlight_and_pick():
+                    def on_tick(e):
+                        if not canvas.winfo_exists():
+                            return
+                        canvas.itemconfig(target_row_bg, fill=_lerp_hex(COLOR_INPUT, COLOR_ACCENT_DIM, e))
+                    tween(canvas, 200, on_tick, finish)
+
+                def finish():
+                    canvas.itemconfig(box_text_item, text=options[choice_index], fill=COLOR_TEXT_MAIN)
+                    for item in dd_items:
+                        canvas.delete(item)
+                    on_done()
+
+                canvas.after(200, lambda: go(target_xy, highlight_and_pick))
+
+            def start():
+                set_cursor(*pos["xy"])
+                canvas.after(500, lambda: go((cx, 50 + 21), click_device_a))
+
+            def click_device_a():
+                flash(box_a, COLOR_INPUT, COLOR_ACCENT_DIM)
+                canvas.after(200, lambda: open_dropdown_and_select(
+                    box_a_coords, box_text_a, ["Speakers", "Headphones", "Monitor Speakers"], 0,
+                    lambda: canvas.after(300, lambda: go((cx, 96 + 21), click_device_b))
+                ))
+
+            def click_device_b():
+                flash(box_b, COLOR_INPUT, COLOR_ACCENT_DIM)
+                canvas.after(200, lambda: open_dropdown_and_select(
+                    box_b_coords, box_text_b, ["Speakers", "Headphones", "Monitor Speakers"], 1,
+                    lambda: canvas.after(300, lambda: go((cx, 142 + 21), click_hotkey))
+                ))
+
+            def click_hotkey():
+                flash(box_key, COLOR_INPUT, COLOR_ACCENT_DIM)
+                canvas.after(450, lambda: go((tx0 + tab_w + tab_gap + tab_w / 2, 8 + tab_h / 2), click_tab_multi))
+
+            def click_tab_multi():
+                def on_tick(e):
+                    if not canvas.winfo_exists():
+                        return
+                    canvas.itemconfig(tab_ab, fill=_lerp_hex(COLOR_ACCENT, COLOR_INPUT, e))
+                    canvas.itemconfig(tab_multi, fill=_lerp_hex(COLOR_INPUT, COLOR_ACCENT, e))
+                    canvas.itemconfig(tab_multi_text, fill=_lerp_hex(COLOR_TEXT_SUB, COLOR_BG, e))
+                tween(canvas, 250, on_tick)
+                for item in ab_group:
+                    canvas.itemconfig(item, state="hidden")
+                for item in multi_group:
+                    canvas.itemconfig(item, state="normal")
+                canvas.after(400, lambda: go((46, 62), click_toggle))
+
+            def click_toggle():
+                def on_tick(e):
+                    if not canvas.winfo_exists():
+                        return
+                    canvas.itemconfig(toggle_track, fill=_lerp_hex(COLOR_INPUT, COLOR_ACCENT, e))
+                    canvas.coords(toggle_knob, 29 + 14 * e, 55, 43 + 14 * e, 69)
+                tween(canvas, 250, on_tick)
+                canvas.after(400, lambda: go((cx, 96 + 21), click_overlay_hotkey))
+
+            def click_overlay_hotkey():
+                flash(box_okey, COLOR_INPUT, COLOR_ACCENT_DIM)
+                canvas.after(450, lambda: go((W - 79, 230), click_save))
+
+            def click_save():
+                def on_tick(e):
+                    if not canvas.winfo_exists():
+                        return
+                    ratio = e * 2 if e < 0.5 else (1 - e) * 2
+                    canvas.itemconfig(btn, fill=_lerp_hex(COLOR_ACCENT, COLOR_ACCENT_HOVER, ratio))
+                tween(canvas, 200, on_tick)
+                canvas.after(900, reset_loop)
+
+            def reset_loop():
+                if not canvas.winfo_exists():
+                    return
+                hide_cursor()
+                for item in multi_group:
+                    canvas.itemconfig(item, state="hidden")
+                for item in ab_group:
+                    canvas.itemconfig(item, state="normal")
+                canvas.itemconfig(box_text_a, text="Select device...", fill=COLOR_TEXT_FAINT)
+                canvas.itemconfig(box_text_b, text="Select device...", fill=COLOR_TEXT_FAINT)
+                canvas.itemconfig(tab_ab, fill=COLOR_ACCENT)
+                canvas.itemconfig(tab_multi, fill=COLOR_INPUT)
+                canvas.itemconfig(tab_multi_text, fill=COLOR_TEXT_SUB)
+                canvas.itemconfig(toggle_track, fill=COLOR_INPUT)
+                canvas.coords(toggle_knob, 29, 55, 43, 69)
+                pos["xy"] = (W + 20, -10)
+                canvas.after(500, start)
+
+            canvas.after(500, start)
+
+        DESKTOP_WALLPAPER = "#233240"
+        DESKTOP_TASKBAR = "#16212b"
+
+        def make_desktop_mockup(canvas, x1, y1, x2, y2):
+            """トースト/オーバーレイが実際にはデスクトップ画面のどこに出るかを
+            示すための、ミニデスクトップ(壁紙+タスクバー)のモックアップ。"""
+            desktop_bg = canvas.create_rectangle(x1, y1, x2, y2, fill=DESKTOP_WALLPAPER, outline=COLOR_BORDER, width=1)
+            taskbar_h = 16
+            taskbar = canvas.create_rectangle(x1, y2 - taskbar_h, x2, y2, fill=DESKTOP_TASKBAR, outline="")
+            canvas.create_oval(x1 + 6, y2 - taskbar_h + 3, x1 + 16, y2 - 3, fill=COLOR_ACCENT, outline="")
+            return desktop_bg, taskbar, taskbar_h
+
+        def make_ab_illustration(canvas):
+            """ステップ2: CTRL+ALT+Aを押す→実際の画面と同じく、デスクトップの
+            右下(タスクバーの上)にトースト通知が現れる→デバイス名を入れ替えて
+            ループ。"""
+            cx = 210
+            keys = draw_keycaps(canvas, ["CTRL", "ALT", "A"], cx, 22)
+
+            desk_x1, desk_y1, desk_x2, desk_y2 = 20, 46, 400, 250
+            _, _, taskbar_h = make_desktop_mockup(canvas, desk_x1, desk_y1, desk_x2, desk_y2)
+
+            TOAST_W, TOAST_H = 190, 50
+            tx = desk_x2 - TOAST_W - 10
+            final_ty = desk_y2 - taskbar_h - TOAST_H - 8
+            slide_offset = 14
+            panel = _rounded_rect(canvas, tx, final_ty, tx + TOAST_W, final_ty + TOAST_H, 10,
+                                   fill=COLOR_PANEL, outline=COLOR_BORDER, width=1)
+            accent_bar = canvas.create_rectangle(tx, final_ty + 7, tx + 3, final_ty + TOAST_H - 7,
+                                                  fill=COLOR_ACCENT, outline="")
+            header = canvas.create_text(tx + 13, final_ty + 15, anchor="w", text="AUDIO ROUTING SWITCHED",
+                                         fill=COLOR_ACCENT, font=("Segoe UI", 6, "bold"))
+            device_text = canvas.create_text(tx + 13, final_ty + 31, anchor="w", text="Headphones",
+                                              fill=COLOR_TEXT_MAIN, font=("Segoe UI", 9, "bold"))
+            toast_items = (panel, accent_bar, header, device_text)
+            for item in toast_items:
+                canvas.itemconfig(item, state="hidden")
+
+            state = {"device": "Speakers"}
+
+            def press():
+                if not canvas.winfo_exists():
+                    return
+                for rect, text in keys:
+                    canvas.itemconfig(rect, fill=COLOR_ACCENT)
+                    canvas.itemconfig(text, fill=COLOR_BG)
+                canvas.after(160, release_and_show_toast)
+
+            def release_and_show_toast():
+                if not canvas.winfo_exists():
+                    return
+                for rect, text in keys:
+                    canvas.itemconfig(rect, fill=COLOR_INPUT)
+                    canvas.itemconfig(text, fill=COLOR_TEXT_MAIN)
+                state["device"] = "Headphones" if state["device"] == "Speakers" else "Speakers"
+                canvas.itemconfig(device_text, text=state["device"])
+                # panelは角丸(_rounded_rect)のポリゴンで、通常の矩形より
+                # 座標の個数が多い。canvas.coords()で絶対座標を与え直すと
+                # 頂点数が合わず形が壊れて斜線が入るため、canvas.move()で
+                # 差分だけ動かす(頂点数に関係なく形を保ったまま平行移動できる)。
+                # まず表示直後に下側へ退避させ、そこからなめらかに元の位置へ。
+                for item in toast_items:
+                    canvas.itemconfig(item, state="normal")
+                    canvas.move(item, 0, slide_offset)
+
+                prev_dy = {"v": slide_offset}
+
+                def on_tick_slide(e):
+                    if not canvas.winfo_exists():
+                        return
+                    dy = slide_offset * (1 - e)
+                    delta = dy - prev_dy["v"]
+                    for item in toast_items:
+                        canvas.move(item, 0, delta)
+                    prev_dy["v"] = dy
+
+                tween(canvas, 220, on_tick_slide, lambda: canvas.after(1500, hide_toast))
+
+            def hide_toast():
+                if not canvas.winfo_exists():
+                    return
+                for item in toast_items:
+                    canvas.itemconfig(item, state="hidden")
+                canvas.after(700, press)
+
+            canvas.after(700, press)
+
+        def make_overlay_illustration(canvas):
+            """ステップ3: CTRL+ALT+Sを押す→実際のMulti-Deviceオーバーレイと
+            同じく、デスクトップ全体が暗くなり中央にカード(「SELECT OUTPUT
+            DEVICE」の見出し・番号付きの行)がスライドイン→マウスカーソルが
+            降りてきて1行をクリックして選ぶ、を繰り返しループ。"""
+            cx = 210
+            keys = draw_keycaps(canvas, ["CTRL", "ALT", "S"], cx, 22)
+
+            desk_x1, desk_y1, desk_x2, desk_y2 = 20, 46, 400, 250
+            desktop_bg, taskbar, _ = make_desktop_mockup(canvas, desk_x1, desk_y1, desk_x2, desk_y2)
+            dim_color = _lerp_hex(DESKTOP_WALLPAPER, "#000000", 0.55)
+            dim_taskbar_color = _lerp_hex(DESKTOP_TASKBAR, "#000000", 0.55)
+
+            CARD_W, ROW_H, HEADER_H = 240, 28, 28
+            labels = ["Speakers", "Headphones", "Monitor Speakers"]
+            card_h = HEADER_H + len(labels) * ROW_H + 8
+            card_x = desk_x1 + ((desk_x2 - desk_x1) - CARD_W) / 2
+            final_card_y = desk_y1 + ((desk_y2 - desk_y1) - card_h) / 2
+            slide_offset = 14
+
+            card_panel = _rounded_rect(canvas, card_x, final_card_y, card_x + CARD_W, final_card_y + card_h, 12,
+                                        fill=COLOR_PANEL, outline=COLOR_BORDER, width=1)
+            card_header = canvas.create_text(card_x + 14, final_card_y + HEADER_H / 2, anchor="w",
+                                              text="SELECT OUTPUT DEVICE", fill=COLOR_TEXT_SUB,
+                                              font=("Segoe UI", 7, "bold"))
+            card_divider = canvas.create_line(card_x + 8, final_card_y + HEADER_H, card_x + CARD_W - 8,
+                                               final_card_y + HEADER_H, fill=COLOR_BORDER)
+            card_items = [card_panel, card_header, card_divider]
+
+            rows = []
+            for i, label in enumerate(labels):
+                y0 = final_card_y + HEADER_H + i * ROW_H
+                row_bg = _rounded_rect(canvas, card_x + 6, y0 + 3, card_x + CARD_W - 6, y0 + ROW_H - 3, 8,
+                                        fill=COLOR_PANEL, outline="")
+                text = canvas.create_text(card_x + 18, y0 + ROW_H / 2, anchor="w", text=label,
+                                           fill=COLOR_TEXT_SUB, font=("Segoe UI", 8))
+                num = canvas.create_text(card_x + CARD_W - 14, y0 + ROW_H / 2, anchor="e", text=str(i + 1),
+                                          fill=COLOR_TEXT_FAINT, font=("Segoe UI", 8))
+                rows.append((row_bg, text, num))
+                card_items.extend([row_bg, text, num])
+
+            for item in card_items:
+                canvas.itemconfig(item, state="hidden")
+
+            set_cursor, move_cursor, hide_cursor = make_cursor(canvas)
+
+            def press():
+                if not canvas.winfo_exists():
+                    return
+                for rect, text in keys:
+                    canvas.itemconfig(rect, fill=COLOR_ACCENT)
+                    canvas.itemconfig(text, fill=COLOR_BG)
+                canvas.after(160, release_and_show_card)
+
+            def release_and_show_card():
+                if not canvas.winfo_exists():
+                    return
+                for rect, text in keys:
+                    canvas.itemconfig(rect, fill=COLOR_INPUT)
+                    canvas.itemconfig(text, fill=COLOR_TEXT_MAIN)
+                # card_panelやrow_bgは角丸(_rounded_rect)のポリゴンで、通常の
+                # 矩形より座標の個数が多い。canvas.coords()で絶対座標を与え
+                # 直すと頂点数が合わず形が壊れて斜線が入るため、canvas.move()
+                # で差分だけ動かす(頂点数に関係なく形を保ったまま平行移動)。
+                # まず表示直後に下側へ退避させ、そこからなめらかに元の位置へ。
+                for item in card_items:
+                    canvas.itemconfig(item, state="normal")
+                    canvas.move(item, 0, slide_offset)
+
+                row_ys = [final_card_y + HEADER_H + i * ROW_H for i in range(len(labels))]
+                prev_dy = {"v": slide_offset}
+
+                def on_tick(e):
+                    if not canvas.winfo_exists():
+                        return
+                    canvas.itemconfig(desktop_bg, fill=_lerp_hex(DESKTOP_WALLPAPER, dim_color, e))
+                    canvas.itemconfig(taskbar, fill=_lerp_hex(DESKTOP_TASKBAR, dim_taskbar_color, e))
+                    dy = slide_offset * (1 - e)
+                    delta = dy - prev_dy["v"]
+                    for item in card_items:
+                        canvas.move(item, 0, delta)
+                    prev_dy["v"] = dy
+
+                def after_slide():
+                    set_cursor(card_x + CARD_W - 30, final_card_y - 20)
+                    move_cursor((card_x + CARD_W - 30, final_card_y - 20),
+                                (card_x + 50, row_ys[1] + ROW_H / 2 - 8), 380,
+                                lambda: canvas.after(150, lambda: select_row(1)))
+
+                tween(canvas, 220, on_tick, after_slide)
+
+            def select_row(row_index):
+                if not canvas.winfo_exists():
+                    return
+                for i, (rect, text, num) in enumerate(rows):
+                    is_sel = i == row_index
+                    canvas.itemconfig(rect, fill=(COLOR_ACCENT_DIM if is_sel else COLOR_PANEL))
+                    canvas.itemconfig(text, fill=(COLOR_ACCENT if is_sel else COLOR_TEXT_SUB))
+                canvas.after(1000, reset_loop)
+
+            def reset_loop():
+                if not canvas.winfo_exists():
+                    return
+                hide_cursor()
+                for item in card_items:
+                    canvas.itemconfig(item, state="hidden")
+                for rect, text, num in rows:
+                    canvas.itemconfig(rect, fill=COLOR_PANEL)
+                    canvas.itemconfig(text, fill=COLOR_TEXT_SUB)
+                canvas.itemconfig(desktop_bg, fill=DESKTOP_WALLPAPER)
+                canvas.itemconfig(taskbar, fill=DESKTOP_TASKBAR)
+                canvas.after(700, press)
+
+            canvas.after(700, press)
+
+        steps = [
+            {
+                "title": "How to set it up",
+                "body": "Pick your devices, set a hotkey, switch tabs to enable\nMulti-Device, and Save & Run — like this:",
+                "illustration": make_settings_illustration,
+            },
+            {
+                "title": "Instant A/B toggle",
+                "body": "Once it's set up, pressing the hotkey you just\nconfigured instantly swaps between your two devices:",
+                "illustration": make_ab_illustration,
+            },
+            {
+                "title": "Switch between 3+ devices",
+                "body": "With Multi-Device enabled, pressing its hotkey brings up\nevery connected device for you to pick from:",
+                "illustration": make_overlay_illustration,
+            },
+            {
+                "title": "You're all set",
+                "body": "Pick your devices and hotkeys below, then Save & Run.",
+                "illustration": None,
+            },
+        ]
+
+        def close_wizard():
+            if wiz["window"] is not None:
+                try:
+                    wiz["window"].destroy()
+                except Exception:
+                    pass
+                wiz["window"] = None
+
+        def advance():
+            if wiz["step"] >= len(steps) - 1:
+                close_wizard()
+                return
+            wiz["step"] += 1
+            render()
+
+        def go_back():
+            if wiz["step"] > 0:
+                wiz["step"] -= 1
+                render()
+
+        def render():
+            for w in body_frame.winfo_children():
+                w.destroy()
+            step = steps[wiz["step"]]
+
+            ctk.CTkLabel(body_frame, text=step["title"], font=FONT_DISPLAY,
+                         text_color=COLOR_TEXT_MAIN, anchor="w").pack(fill="x", padx=32, pady=(26, 10))
+            ctk.CTkLabel(body_frame, text=step["body"], font=FONT_BODY, text_color=COLOR_TEXT_SUB,
+                         justify="left", anchor="w").pack(fill="x", padx=32, pady=(0, 18))
+
+            illo_canvas = tk.Canvas(body_frame, width=420, height=260, bg=COLOR_PANEL, highlightthickness=0)
+            illo_canvas.pack(pady=(0, 18))
+            if step["illustration"]:
+                step["illustration"](illo_canvas)
+
+            n = len(steps)
+            active_w, inactive_w, dot_h, gap = 20, 7, 7, 6
+            dots_w = active_w + inactive_w * (n - 1) + gap * (n - 1) + 14
+            dots_canvas = tk.Canvas(body_frame, width=dots_w, height=dot_h + 4, bg=COLOR_PANEL, highlightthickness=0)
+            dots_canvas.pack(pady=(0, 18))
+            dx = 4
+            for i in range(n):
+                is_active = i == wiz["step"]
+                w = active_w if is_active else inactive_w
+                color = COLOR_ACCENT if is_active else COLOR_ACCENT_DIM
+                _rounded_rect(dots_canvas, dx, 2, dx + w, 2 + dot_h, dot_h / 2, fill=color, outline="")
+                dx += w + gap
+
+            bottom = ctk.CTkFrame(body_frame, fg_color="transparent")
+            bottom.pack(fill="x", padx=32, pady=(0, 26))
+            ctk.CTkButton(
+                bottom, text="Skip", command=close_wizard,
+                fg_color="transparent", hover_color=COLOR_INPUT, text_color=COLOR_TEXT_SUB,
+                border_width=1, border_color=COLOR_BORDER, corner_radius=8,
+                font=FONT_LABEL, width=90, height=36,
+            ).pack(side="left")
+
+            right_frame = ctk.CTkFrame(bottom, fg_color="transparent")
+            right_frame.pack(side="right")
+            if wiz["step"] > 0:
+                ctk.CTkButton(
+                    right_frame, text="Back", command=go_back,
+                    fg_color="transparent", hover_color=COLOR_INPUT, text_color=COLOR_TEXT_SUB,
+                    border_width=1, border_color=COLOR_BORDER, corner_radius=8,
+                    font=FONT_LABEL, width=90, height=36,
+                ).pack(side="left", padx=(0, 10))
+            is_last = wiz["step"] == len(steps) - 1
+            ctk.CTkButton(
+                right_frame, text=("Get Started" if is_last else "Next"), command=advance,
+                fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_BG,
+                corner_radius=8, font=FONT_LABEL, width=120, height=36,
+            ).pack(side="left")
+
+        WIZ_W = 492
+
+        win = ctk.CTkToplevel(root)
+        win.title("Welcome to AudioSwitcher")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        win.transient(root)
+        # 閉じる方法は下部の"Skip"だけにしたいので、タイトルバーの×では
+        # 閉じられないようにする(WM_DELETE_WINDOWを無視するだけにする)。
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+        wiz["window"] = win
+
+        body_frame = ctk.CTkFrame(win, fg_color=COLOR_PANEL, corner_radius=0)
+        body_frame.pack(fill="both", expand=True)
+
+        render()
+
+        # ウィンドウサイズは実際に組み終えた中身の実測サイズに合わせる
+        # (イラストの大きさを変えるたびに固定値を数え直さなくて済むように)。
+        win.update_idletasks()
+        wiz_h = win.winfo_reqheight() + 12
+        root.update_idletasks()
+        rx, ry = root.winfo_x(), root.winfo_y()
+        rw, rh = root.winfo_width(), root.winfo_height()
+        win.geometry(f"{WIZ_W}x{wiz_h}+{rx + (rw - WIZ_W) // 2}+{ry + (rh - wiz_h) // 2}")
+
+    if is_first_run:
+        show_onboarding()
+
     root.mainloop()
 
 if __name__ == "__main__":
+    enable_dpi_awareness()
     try:
         if "/background" in sys.argv:
             if os.path.exists(CONFIG_FILE): start_backend()
