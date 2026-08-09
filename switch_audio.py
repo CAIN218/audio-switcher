@@ -3,6 +3,7 @@ import subprocess
 import keyboard
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import font as tkfont
 import time
 import sys
 import warnings
@@ -31,7 +32,7 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -276,14 +277,19 @@ def _rounded_rect(cv, x1, y1, x2, y2, r, **kwargs):
 class _ToastManager:
     WIDTH, HEIGHT = 320, 68
 
+    DEVICE_FONT = ("Segoe UI", 10, "bold")
+
     def __init__(self, root):
         self.root = root
         self.window = None
         self.canvas = None
         self.fade_job = None
+        self.marquee_job = None
         self.current_alpha = 0.0
         self.on_click = None
         self._hold_ms = 2600
+        self._device_font = tkfont.Font(root=root, family=self.DEVICE_FONT[0],
+                                         size=self.DEVICE_FONT[1], weight=self.DEVICE_FONT[2])
 
     def _ensure_window(self):
         if self.window is not None:
@@ -328,6 +334,9 @@ class _ToastManager:
         if self.fade_job:
             self.root.after_cancel(self.fade_job)
             self.fade_job = None
+        if self.marquee_job:
+            self.root.after_cancel(self.marquee_job)
+            self.marquee_job = None
 
         canvas = self.canvas
         canvas.delete("all")
@@ -337,9 +346,19 @@ class _ToastManager:
         canvas.create_rectangle(0, 12, 4, self.HEIGHT - 12, fill=COLOR_ACCENT, outline="")
         canvas.create_text(22, 22, anchor="w", text="AUDIO ROUTING SWITCHED",
                             fill=COLOR_ACCENT, font=("Segoe UI", 8, "bold"))
-        display_text = device_name if len(device_name) <= 34 else device_name[:32] + "..."
-        canvas.create_text(22, 44, anchor="w", text=display_text,
-                            fill=COLOR_TEXT_MAIN, font=("Segoe UI", 10, "bold"))
+
+        # 長いデバイス名は「...」で切らず、収まりきらない分だけ左右に
+        # ゆっくり往復させて全体を読めるようにする(Canvasは自身の外側を
+        # 自動的に描画しないので、はみ出した部分は特別なクリップ処理
+        # なしでそのまま隠れる)。
+        left_x = 22
+        right_bound = self.WIDTH - 14
+        text_item = canvas.create_text(left_x, 44, anchor="w", text=device_name,
+                                        fill=COLOR_TEXT_MAIN, font=self.DEVICE_FONT)
+        text_width = self._device_font.measure(device_name)
+        if text_width > (right_bound - left_x):
+            self._start_marquee(text_item, text_width, left_x, right_bound)
+
         canvas.configure(cursor="")
 
         self.on_click = None
@@ -350,6 +369,35 @@ class _ToastManager:
         self.current_alpha = 0.0
         self._fade_in()
 
+    def _start_marquee(self, item, text_width, left_x, right_bound):
+        """収まりきらないデバイス名を、はみ出した分だけ左へスクロールして
+        端で少し止まり、また右へ戻って止まる、を繰り返す。"""
+        canvas = self.canvas
+        scroll_distance = text_width - (right_bound - left_x)
+        min_x = left_x - scroll_distance
+        state = {"x": left_x, "dir": -1, "pause": 18}  # 表示直後に少し静止してから動き出す
+
+        def tick():
+            if not canvas.winfo_exists() or self.window is None:
+                return
+            if state["pause"] > 0:
+                state["pause"] -= 1
+                self.marquee_job = self.root.after(40, tick)
+                return
+            state["x"] += state["dir"] * 1.4
+            if state["dir"] < 0 and state["x"] <= min_x:
+                state["x"] = min_x
+                state["dir"] = 1
+                state["pause"] = 18
+            elif state["dir"] > 0 and state["x"] >= left_x:
+                state["x"] = left_x
+                state["dir"] = -1
+                state["pause"] = 18
+            canvas.coords(item, state["x"], 44)
+            self.marquee_job = self.root.after(40, tick)
+
+        self.marquee_job = self.root.after(40, tick)
+
     def show_update_available(self, latest_tag, release_url):
         """新しいバージョンが見つかった時の控えめな通知。クリックでリリース
         ページを開く。頻繁に出るものではないので、通常のトーストより長めに
@@ -358,6 +406,9 @@ class _ToastManager:
         if self.fade_job:
             self.root.after_cancel(self.fade_job)
             self.fade_job = None
+        if self.marquee_job:
+            self.root.after_cancel(self.marquee_job)
+            self.marquee_job = None
 
         canvas = self.canvas
         canvas.delete("all")
@@ -394,6 +445,9 @@ class _ToastManager:
         else:
             self.window.withdraw()
             self.fade_job = None
+            if self.marquee_job:
+                self.root.after_cancel(self.marquee_job)
+                self.marquee_job = None
 
 
 # ----------------------------------------------------------------------
@@ -1078,18 +1132,32 @@ def open_setting_window():
         corner_radius=8, height=34,
     )
 
+    def make_combo_fully_clickable(combo):
+        """CTkComboBoxは標準だと右端の矢印(dropdown_arrow)部分しかクリックで
+        開かない仕様(customtkinter側の_create_bindingsがright_parts/
+        dropdown_arrowタグにしかBUtton-1を張っていないため)。本体のテキスト
+        部分(Entry)をクリックしても同じ_clicked()ハンドラーが呼ばれるように
+        バインドを足し、枠のどこを押しても開くようにする。
+        またEntry標準のIビーム(テキスト選択)カーソルのままだと編集可能な
+        欄に見えてクリックできることが伝わりづらいので、通常の矢印カーソル
+        に戻しておく。"""
+        combo._entry.bind("<Button-1>", combo._clicked)
+        combo._entry.configure(cursor="arrow")
+
     label_a = section_label(container, "DEVICE LAYER A")
     combo_a = ctk.CTkComboBox(container, values=devices, **combo_kwargs)
     combo_a.pack(fill="x", padx=24, pady=(0, 10))
     if saved_a in devices: combo_a.set(saved_a)
     elif current_default in devices: combo_a.set(current_default)
     else: combo_a.set(devices[0])
+    make_combo_fully_clickable(combo_a)
 
     label_b = section_label(container, "DEVICE LAYER B")
     combo_b = ctk.CTkComboBox(container, values=devices_b_options, **combo_kwargs)
     combo_b.pack(fill="x", padx=24, pady=(0, 10))
     if saved_b in devices_b_options and saved_b != "Select device...": combo_b.set(saved_b)
     else: combo_b.set(devices_b_options[0])
+    make_combo_fully_clickable(combo_b)
 
     combo_a.configure(command=lambda _=None: refresh_indicator())
     combo_b.configure(command=lambda _=None: refresh_indicator())

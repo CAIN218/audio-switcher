@@ -1,7 +1,9 @@
 dist/
 build/
 release_package/
+installer_output/
 __pycache__/
 app_config.txt
 error.log
 *.pyc
+*.iss.bak
