@@ -19,7 +19,7 @@ from win32com.client import Dispatch
 
 import comtypes
 from pycaw.pycaw import AudioUtilities
-from pycaw.constants import DEVICE_STATE, EDataFlow
+from pycaw.constants import DEVICE_STATE, EDataFlow, ERole
 
 # customtkinter（設定画面専用のUIライブラリ）はここでは読み込まない。
 # バックグラウンド常駐時はホットキー監視しかしないため、
@@ -33,7 +33,7 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -124,6 +124,16 @@ def kill_previous_instances():
             )
     except Exception:
         pass
+
+def set_default_device_all_roles(target_id):
+    """既定の再生デバイスを、eConsole/eMultimedia/eCommunicationsの全ロール
+    に対して切り替える(SoundVolumeViewの"all"相当)。pycawのSetDefaultDevice
+    はroles未指定だとeConsoleしか設定しない(ドキュメントやコード内の古い
+    コメントとは異なる実際の挙動)ため、明示的に3ロール全てを渡す必要が
+    ある。eCommunicationsを設定しないと、Discordのように「既定の通信
+    デバイス」を優先して追従するアプリが切り替わらない。"""
+    AudioUtilities.SetDefaultDevice(target_id, roles=[ERole.eConsole, ERole.eMultimedia, ERole.eCommunications])
+
 
 def get_device_info():
     """pycaw(Windows Core Audio API)経由でデバイスリストと現在のデフォルトを取得（外部exe不要）"""
@@ -859,8 +869,7 @@ def _switch_worker():
             if target_id:
                 try:
                     ensure_com_initialized()
-                    # roles=NoneでeConsole/eMultimedia/eCommunicationsの全ロールに設定（SoundVolumeViewの"all"相当）
-                    AudioUtilities.SetDefaultDevice(target_id)
+                    set_default_device_all_roles(target_id)
                 except Exception as e:
                     log_error("SetDefaultDevice", e)
                     continue
@@ -879,7 +888,7 @@ def _direct_switch_worker():
         target_id, target_display_name = _direct_switch_queue.get()
         try:
             ensure_com_initialized()
-            AudioUtilities.SetDefaultDevice(target_id)
+            set_default_device_all_roles(target_id)
             _toast_queue.put(target_display_name)
         except Exception as e:
             log_error("direct_switch_worker", e)
@@ -1043,7 +1052,6 @@ def open_setting_window():
     root.title("AudioSwitcher")
     root.geometry("560x600")
     root.resizable(False, False)
-    root.attributes("-topmost", True)
     if os.path.exists(ICON_PATH):
         try:
             root.iconbitmap(ICON_PATH)
@@ -1313,7 +1321,7 @@ def open_setting_window():
             return
         try:
             ensure_com_initialized()
-            AudioUtilities.SetDefaultDevice(target_id)
+            set_default_device_all_roles(target_id)
         except Exception as e:
             log_error("test_switch", e)
             tk.messagebox.showerror("Error", f"切り替えに失敗しました: {e}")
