@@ -1165,100 +1165,111 @@ def open_setting_window():
     tabview.pack(fill="both", expand=True, padx=30, pady=(0, 14))
     tab_general = tabview.add("A/B SWITCH")
     tab_multi = tabview.add("MULTI-DEVICE")
+    tab_update = tabview.add("UPDATE")
 
-    # トースト通知は消えると気づけない、という指摘を受けて、設定画面を開く
-    # たびに最新リリースを確認し、見つかった場合は消えずに残る「UPDATE」
-    # タブを追加する(いつ見ても分かるように)。
+    # UPDATEタブは常に表示しておく(更新がある時しか出ないと、Auto-update
+    # トグル自体を普段いじれなくなってしまうため)。中身(タイトル/ボタン)は
+    # チェック結果に応じて後から書き換える。
+    update_panel = ctk.CTkFrame(tab_update, fg_color=COLOR_PANEL, corner_radius=14, border_width=0)
+    update_panel.pack(fill="x", pady=(2, 10))
+
+    update_title_var = tk.StringVar(value="CHECKING FOR UPDATES...")
+    ctk.CTkLabel(update_panel, textvariable=update_title_var, font=("Segoe UI", 9, "bold"),
+                 text_color=COLOR_ACCENT, anchor="w").pack(fill="x", padx=20, pady=(18, 2))
+    update_detail_var = tk.StringVar(value=f"Current version: v{__version__}")
+    ctk.CTkLabel(update_panel, textvariable=update_detail_var, font=FONT_BODY, text_color=COLOR_TEXT_MAIN,
+                 anchor="w").pack(fill="x", padx=20, pady=(0, 4))
+    update_status_var = tk.StringVar(value="")
+    ctk.CTkLabel(update_panel, textvariable=update_status_var, font=FONT_BODY, text_color=COLOR_TEXT_SUB,
+                 anchor="w", wraplength=460, justify="left").pack(fill="x", padx=20, pady=(0, 10))
+
+    _update_state = {"installer_url": None, "release_url": None}
+
+    # インストール自体は(ONでもOFFでも)常にウィザードなしのサイレント
+    # インストールで行う。ONは何もしなくても自動でこれが走り、OFFは
+    # ボタンを押すことがそのトリガーになる、という違いだけ。
+    def start_install():
+        installer_url = _update_state["installer_url"]
+        release_url = _update_state["release_url"]
+        if not installer_url:
+            if release_url:
+                webbrowser.open(release_url)
+            return
+        install_btn.configure(state="disabled", text="Updating...")
+        update_status_var.set("")
+
+        def worker():
+            try:
+                req = urllib.request.Request(installer_url, headers={"User-Agent": "AudioSwitcher-update-check"})
+                installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
+                with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
+                    f.write(resp.read())
+                os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
+                msg = "Installing update in the background — AudioSwitcher will restart automatically."
+                root.after(0, lambda: update_status_var.set(msg))
+            except Exception as e:
+                log_error("settings_download_installer", e)
+
+                def on_fail():
+                    install_btn.configure(state="normal", text="Open release page",
+                                           command=lambda: webbrowser.open(release_url))
+                    update_status_var.set("Download failed. Click to open the release page instead.")
+                root.after(0, on_fail)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_auto_toggle():
+        if auto_update_var.get() == "1" and _update_state["installer_url"]:
+            start_install()
+
+    switch_auto_update = ctk.CTkSwitch(
+        update_panel, text="Auto-update (always stay on the latest version)",
+        variable=auto_update_var, onvalue="1", offvalue="0", command=on_auto_toggle,
+        font=FONT_BODY, text_color=COLOR_TEXT_SUB,
+        fg_color=COLOR_INPUT, progress_color=COLOR_ACCENT,
+        button_color=COLOR_TEXT_MAIN, button_hover_color=COLOR_ACCENT_HOVER,
+    )
+    switch_auto_update.pack(fill="x", padx=20, pady=(4, 12), anchor="w")
+
+    install_btn = ctk.CTkButton(
+        update_panel, text="Up to date", state="disabled", command=start_install,
+        fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_BG,
+        corner_radius=8, font=FONT_LABEL, height=36,
+    )
+    install_btn.pack(fill="x", padx=20, pady=(0, 20))
+
     _update_info_queue = queue.Queue()
 
-    def _check_for_update_tab():
+    def _check_for_updates():
         def worker():
             try:
                 info = _fetch_latest_release_info()
-                if info:
-                    _update_info_queue.put(info)
             except Exception as e:
                 log_error("settings_update_check", e)
+                info = None
+            _update_info_queue.put(info)
         threading.Thread(target=worker, daemon=True).start()
-
-    def _add_update_tab(latest_tag, release_url, installer_url):
-        tab_update = tabview.add("UPDATE")
-        panel = ctk.CTkFrame(tab_update, fg_color=COLOR_PANEL, corner_radius=14, border_width=0)
-        panel.pack(fill="x", pady=(2, 10))
-        ctk.CTkLabel(panel, text="UPDATE AVAILABLE", font=("Segoe UI", 9, "bold"),
-                     text_color=COLOR_ACCENT, anchor="w").pack(fill="x", padx=20, pady=(18, 2))
-        ctk.CTkLabel(panel, text=f"{latest_tag} is available (current: v{__version__})",
-                     font=FONT_BODY, text_color=COLOR_TEXT_MAIN, anchor="w").pack(fill="x", padx=20, pady=(0, 4))
-        status_var = tk.StringVar(value="")
-        ctk.CTkLabel(panel, textvariable=status_var, font=FONT_BODY, text_color=COLOR_TEXT_SUB,
-                     anchor="w", wraplength=460, justify="left").pack(fill="x", padx=20, pady=(0, 10))
-
-        # インストール自体は(ONでもOFFでも)常にウィザードなしのサイレント
-        # インストールで行う。ONは何もしなくても自動でこれが走り、OFFは
-        # このタブでボタンを押すことがそのトリガーになる、という違いだけ。
-        def start_install():
-            if not installer_url:
-                webbrowser.open(release_url)
-                return
-            install_btn.configure(state="disabled", text="Updating...")
-            status_var.set("")
-
-            def worker():
-                try:
-                    req = urllib.request.Request(installer_url, headers={"User-Agent": "AudioSwitcher-update-check"})
-                    installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
-                    with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
-                        f.write(resp.read())
-                    os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
-                    msg = "Installing update in the background — AudioSwitcher will restart automatically."
-                    root.after(0, lambda: status_var.set(msg))
-                except Exception as e:
-                    log_error("settings_download_installer", e)
-
-                    def on_fail():
-                        install_btn.configure(state="normal", text="Open release page",
-                                               command=lambda: webbrowser.open(release_url))
-                        status_var.set("Download failed. Click to open the release page instead.")
-                    root.after(0, on_fail)
-            threading.Thread(target=worker, daemon=True).start()
-
-        auto_row = ctk.CTkFrame(panel, fg_color="transparent")
-        auto_row.pack(fill="x", padx=20, pady=(0, 12))
-
-        def on_auto_toggle():
-            if auto_update_var.get() == "1" and installer_url:
-                start_install()
-
-        switch_auto_update = ctk.CTkSwitch(
-            auto_row, text="Auto-update (always stay on the latest version)",
-            variable=auto_update_var, onvalue="1", offvalue="0", command=on_auto_toggle,
-            font=FONT_BODY, text_color=COLOR_TEXT_SUB,
-            fg_color=COLOR_INPUT, progress_color=COLOR_ACCENT,
-            button_color=COLOR_TEXT_MAIN, button_hover_color=COLOR_ACCENT_HOVER,
-        )
-        switch_auto_update.pack(side="left", anchor="w")
-
-        install_btn = ctk.CTkButton(
-            panel, text="Download & Install", command=start_install,
-            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_BG,
-            corner_radius=8, font=FONT_LABEL, height=36,
-        )
-        install_btn.pack(fill="x", padx=20, pady=(0, 20))
-
-        # ONならこのタブが開かれた時点で(クリック不要で)即座に更新を始める。
-        if auto_update_var.get() == "1" and installer_url:
-            start_install()
 
     def _poll_update_info_queue():
         try:
-            latest_tag, release_url, installer_url = _update_info_queue.get_nowait()
-            _add_update_tab(latest_tag, release_url, installer_url)
+            info = _update_info_queue.get_nowait()
+            if info:
+                latest_tag, release_url, installer_url = info
+                _update_state["installer_url"] = installer_url
+                _update_state["release_url"] = release_url
+                update_title_var.set("UPDATE AVAILABLE")
+                update_detail_var.set(f"{latest_tag} is available (current: v{__version__})")
+                install_btn.configure(state="normal", text="Download & Install")
+                if auto_update_var.get() == "1" and installer_url:
+                    start_install()
+            else:
+                update_title_var.set("UP TO DATE")
+                update_detail_var.set(f"You're on the latest version (v{__version__})")
             return
         except queue.Empty:
             pass
         root.after(500, _poll_update_info_queue)
 
-    _check_for_update_tab()
+    _check_for_updates()
     root.after(500, _poll_update_info_queue)
 
     # ルーティング・インジケーター（現在どちらのレイヤーがアクティブかをパッチベイ風に表示）
