@@ -32,7 +32,7 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -952,7 +952,8 @@ def open_setting_window():
 
         rec = {"recording": False, "keys": set(), "value": initial_value, "saved": initial_value}
         key_map = {"Control_L": "ctrl", "Control_R": "ctrl", "Alt_L": "alt", "Alt_R": "alt",
-                   "Shift_L": "shift", "Shift_R": "shift", "Win_L": "win", "Win_R": "win"}
+                   "Shift_L": "shift", "Shift_R": "shift", "Win_L": "win", "Win_R": "win",
+                   "Prior": "page up", "Next": "page down"}
 
         def on_key_press(event):
             if not rec["recording"]: return "break"
