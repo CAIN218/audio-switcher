@@ -163,12 +163,13 @@ def get_device_info():
         return {}, None
 
 def load_config():
-    """設定ファイルの読み込み。5〜7行目(複数デバイス切り替えオーバーレイの
-    ホットキー・有効/無効、およびA/Bトグル自体の有効/無効)は後から追加した
-    項目なので、無い場合はデフォルト値にフォールバックし、古い設定ファイル
-    もそのまま読み込めるようにしている。A/Bトグルは元々常に有効だった機能
-    なので、値が無い場合のデフォルトは"1"(有効)にして既存ユーザーの挙動を
-    変えないようにしている。"""
+    """設定ファイルの読み込み。5〜8行目(複数デバイス切り替えオーバーレイの
+    ホットキー・有効/無効、A/Bトグル自体の有効/無効、自動更新の有効/無効)は
+    後から追加した項目なので、無い場合はデフォルト値にフォールバックし、
+    古い設定ファイルもそのまま読み込めるようにしている。A/Bトグルは元々
+    常に有効だった機能なので、値が無い場合のデフォルトは"1"(有効)にして
+    既存ユーザーの挙動を変えないようにしている。自動更新も同様に既定は
+    "1"(有効)。"""
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             lines = f.read().splitlines()
@@ -179,13 +180,14 @@ def load_config():
         overlay_key = lines[4] if len(lines) > 4 else DEFAULT_OVERLAY_HOTKEY
         overlay_enabled = lines[5] if len(lines) > 5 else "0"
         ab_enabled = lines[6] if len(lines) > 6 else "1"
-        return dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled
-    return "", "", "ctrl+alt+a", "0", DEFAULT_OVERLAY_HOTKEY, "0", "1"
+        auto_update_enabled = lines[7] if len(lines) > 7 else "1"
+        return dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled, auto_update_enabled
+    return "", "", "ctrl+alt+a", "0", DEFAULT_OVERLAY_HOTKEY, "0", "1", "1"
 
-def save_config(dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled):
+def save_config(dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled, auto_update_enabled="1"):
     """設定ファイルの保存とスタートアップ制御"""
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        f.write(f"{dev_a}\n{dev_b}\n{key}\n{startup_val}\n{overlay_key}\n{overlay_enabled}\n{ab_enabled}")
+        f.write(f"{dev_a}\n{dev_b}\n{key}\n{startup_val}\n{overlay_key}\n{overlay_enabled}\n{ab_enabled}\n{auto_update_enabled}")
     manage_startup(startup_val)
 
 def manage_startup(startup_val):
@@ -293,6 +295,7 @@ class _ToastManager:
                                          size=self.DEVICE_FONT[1], weight=self.DEVICE_FONT[2])
         self._update_subtitle_id = None
         self._pending_release_url = None
+        self.auto_update_enabled = True
 
     def _ensure_window(self):
         if self.window is not None:
@@ -455,7 +458,7 @@ class _ToastManager:
         except Exception:
             pass
         threading.Thread(target=_download_and_launch_installer,
-                          args=(installer_url, release_url), daemon=True).start()
+                          args=(installer_url, release_url, self.auto_update_enabled), daemon=True).start()
 
     def _finish_update_download(self, ok):
         """ダウンロード完了(成功/失敗)を受けて表示を更新する。失敗時は
@@ -463,7 +466,9 @@ class _ToastManager:
         try:
             if self._update_subtitle_id is not None and self.canvas is not None:
                 if ok:
-                    self.canvas.itemconfigure(self._update_subtitle_id, text="Installer launched — continuing setup...")
+                    msg = "Installing update — AudioSwitcher will restart automatically." if self.auto_update_enabled \
+                        else "Installer launched — continuing setup..."
+                    self.canvas.itemconfigure(self._update_subtitle_id, text=msg)
                 else:
                     self.canvas.itemconfigure(self._update_subtitle_id, text="Download failed — click to view")
                     self.canvas.configure(cursor="hand2")
@@ -782,11 +787,14 @@ def _update_check_loop():
         time.sleep(24 * 60 * 60)
 
 
-def _download_and_launch_installer(installer_url, release_url):
+def _download_and_launch_installer(installer_url, release_url, silent=False):
     """アップデート通知のクリックを受けて、インストーラーをダウンロードし
     自動起動する(ダブルクリックで実行するのと同じ)。起動したインストーラー
     自身が現在動作中のこのプロセスを終了・上書きインストールしてくれるため、
-    ここでは起動するところまでで良い。ネットワークエラー等は結果を
+    ここでは起動するところまでで良い。silent=Trueの場合はウィザード画面を
+    出さず、ソフトウェアアップデートのように無人でインストールし直後に
+    アプリを再起動する(installer.iss側の[Run]がpostinstallに反応して
+    サイレントインストール後も起動し直す)。ネットワークエラー等は結果を
     _install_status_queue経由でメインスレッドに伝え、失敗時はリリース
     ページを開くフォールバックに切り替えてもらう。"""
     try:
@@ -794,7 +802,10 @@ def _download_and_launch_installer(installer_url, release_url):
         installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
         with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
             f.write(resp.read())
-        os.startfile(installer_path)
+        if silent:
+            os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
+        else:
+            os.startfile(installer_path)
         _install_status_queue.put(("done", None))
     except Exception as e:
         log_error("download_installer", e)
@@ -827,7 +838,7 @@ def _switch_worker():
     while True:
         _switch_request_queue.get()
         try:
-            dev_a, dev_b, _, _, _, _, _ = load_config()
+            dev_a, dev_b, _, _, _, _, _, _ = load_config()
             device_dict, current_default = get_device_info()
 
             if not current_default:
@@ -916,7 +927,7 @@ def start_backend():
     """バックグラウンドでのキーボード監視 + 常駐トースト用Tkループの開始
     Tclインタプリタを1つだけ常駐させ、切り替えのたびに使い回すことで
     インタプリタの生成・破棄によるメモリ増加を防ぐ。"""
-    _, _, shortcut_key, _, overlay_key, overlay_enabled, ab_enabled = load_config()
+    _, _, shortcut_key, _, overlay_key, overlay_enabled, ab_enabled, auto_update_enabled = load_config()
 
     hotkeys = []
     if ab_enabled == "1" and shortcut_key:
@@ -939,6 +950,7 @@ def start_backend():
     root.withdraw()
     root.report_callback_exception = lambda exc_type, exc_value, tb: log_error("tk_callback", exc_value)
     toast_manager = _ToastManager(root)
+    toast_manager.auto_update_enabled = (auto_update_enabled == "1")
     device_overlay = _DeviceOverlay(root)
 
     def _on_overlay_select(name, target_id):
@@ -1012,7 +1024,7 @@ def open_setting_window():
         )
         devices = ["Speakers", "Headphones"]
 
-    saved_a, saved_b, saved_key, saved_startup, saved_overlay_key, saved_overlay_enabled, saved_ab_enabled = load_config()
+    saved_a, saved_b, saved_key, saved_startup, saved_overlay_key, saved_overlay_enabled, saved_ab_enabled, saved_auto_update = load_config()
     devices_b_options = ["Select device..."] + devices
 
     ctk.set_appearance_mode("dark")
@@ -1184,8 +1196,13 @@ def open_setting_window():
                     installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
                     with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
                         f.write(resp.read())
-                    os.startfile(installer_path)
-                    root.after(0, lambda: status_var.set("Installer launched — this window will close shortly."))
+                    if auto_update_var.get() == "1":
+                        os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
+                        msg = "Installing update in the background — AudioSwitcher will restart automatically."
+                    else:
+                        os.startfile(installer_path)
+                        msg = "Installer launched — this window will close shortly."
+                    root.after(0, lambda: status_var.set(msg))
                 except Exception as e:
                     log_error("settings_download_installer", e)
 
@@ -1410,6 +1427,15 @@ def open_setting_window():
     )
     switch_startup.pack(side="left", anchor="w")
 
+    auto_update_var = tk.StringVar(value=saved_auto_update)
+    switch_auto_update = ctk.CTkSwitch(
+        bottom_bar, text="Auto-update", variable=auto_update_var, onvalue="1", offvalue="0",
+        font=FONT_BODY, text_color=COLOR_TEXT_SUB,
+        fg_color=COLOR_INPUT, progress_color=COLOR_ACCENT,
+        button_color=COLOR_TEXT_MAIN, button_hover_color=COLOR_ACCENT_HOVER,
+    )
+    switch_auto_update.pack(side="left", anchor="w", padx=(18, 0))
+
     btn_frame = ctk.CTkFrame(bottom_bar, fg_color="transparent")
     btn_frame.pack(side="right")
 
@@ -1418,7 +1444,8 @@ def open_setting_window():
             tk.messagebox.showwarning("Routing Incomplete", "Please select a valid target for Device Layer B.")
             return
         save_config(combo_a.get(), combo_b.get(), get_shortcut(), startup_var.get(),
-                    get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get())
+                    get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get(),
+                    auto_update_var.get())
         root.destroy()
         sys.exit(0)
 
@@ -1435,7 +1462,8 @@ def open_setting_window():
             tk.messagebox.showwarning("Routing Incomplete", "Please select a valid target for Device Layer B.")
             return
         save_config(combo_a.get(), combo_b.get(), get_shortcut(), startup_var.get(),
-                    get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get())
+                    get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get(),
+                    auto_update_var.get())
         root.destroy()
         start_backend()
 

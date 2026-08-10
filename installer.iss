@@ -50,6 +50,10 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; postinstallはウィザードの完了画面のチェックボックスと連動する仕組みで、
+; サイレントインストール時は(skipifsilentの有無に関わらず)発火しない。
+; そのためサイレント時の再起動は[Code]のCurStepChanged側でWizardSilent()
+; を見て明示的にExecしている(下記参照)。
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
@@ -179,6 +183,8 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
 begin
   if (CurStep = ssInstall) and IsUpgrade() then
     UninstallOldVersion();
@@ -192,6 +198,12 @@ begin
     end;
     if RestoreStartupShortcut then
       RecreateStartupShortcut();
+
+    // [Run]のpostinstallはサイレント時に発火しないため、Auto-updateから
+    // /VERYSILENTで呼ばれた時だけここで明示的に起動し直す(ソフトウェア
+    // アップデートのように無人で再起動する体験にするため)。
+    if WizardSilent() then
+      Exec(ExpandConstant('{app}\{#MyAppExeName}'), '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
   end;
 end;
 
