@@ -33,7 +33,7 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -742,6 +742,31 @@ def _parse_version(tag):
 _update_queue = queue.Queue()
 _install_status_queue = queue.Queue()
 
+
+def _fetch_latest_release_info():
+    """GitHubの最新リリースを確認する。__version__より新しい場合だけ
+    (latest_tag, release_url, installer_url)を返し、そうでなければNoneを
+    返す。バックグラウンドの定期チェックと、設定画面を開くたびの即時チェック
+    の両方から共通で使う。呼び出し側で例外を処理すること。"""
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "AudioSwitcher-update-check"},
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    latest_tag = data.get("tag_name", "")
+    release_url = data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
+    installer_url = None
+    for asset in data.get("assets", []) or []:
+        name = asset.get("name", "")
+        if name.lower().startswith("audioswitcher-setup") and name.lower().endswith(".exe"):
+            installer_url = asset.get("browser_download_url")
+            break
+    if latest_tag and _parse_version(latest_tag) > _parse_version(__version__):
+        return (latest_tag, release_url, installer_url)
+    return None
+
+
 def _update_check_loop():
     """1日1回、GitHubの最新リリースを確認する。バックグラウンドの常駐
     ツールなので、失敗(オフライン等)は完全に握りつぶし通常動作に一切
@@ -749,22 +774,9 @@ def _update_check_loop():
     キューに積んでメインスレッド側(poll_toast_queue)に伝える。"""
     while True:
         try:
-            req = urllib.request.Request(
-                f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
-                headers={"Accept": "application/vnd.github+json", "User-Agent": "AudioSwitcher-update-check"},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            latest_tag = data.get("tag_name", "")
-            release_url = data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
-            installer_url = None
-            for asset in data.get("assets", []) or []:
-                name = asset.get("name", "")
-                if name.lower().startswith("audioswitcher-setup") and name.lower().endswith(".exe"):
-                    installer_url = asset.get("browser_download_url")
-                    break
-            if latest_tag and _parse_version(latest_tag) > _parse_version(__version__):
-                _update_queue.put((latest_tag, release_url, installer_url))
+            info = _fetch_latest_release_info()
+            if info:
+                _update_queue.put(info)
         except Exception as e:
             log_error("update_check", e)
         time.sleep(24 * 60 * 60)
@@ -1131,6 +1143,77 @@ def open_setting_window():
     tabview.pack(fill="both", expand=True, padx=30, pady=(0, 14))
     tab_general = tabview.add("A/B SWITCH")
     tab_multi = tabview.add("MULTI-DEVICE")
+
+    # トースト通知は消えると気づけない、という指摘を受けて、設定画面を開く
+    # たびに最新リリースを確認し、見つかった場合は消えずに残る「UPDATE」
+    # タブを追加する(いつ見ても分かるように)。
+    _update_info_queue = queue.Queue()
+
+    def _check_for_update_tab():
+        def worker():
+            try:
+                info = _fetch_latest_release_info()
+                if info:
+                    _update_info_queue.put(info)
+            except Exception as e:
+                log_error("settings_update_check", e)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _add_update_tab(latest_tag, release_url, installer_url):
+        tab_update = tabview.add("UPDATE")
+        panel = ctk.CTkFrame(tab_update, fg_color=COLOR_PANEL, corner_radius=14, border_width=0)
+        panel.pack(fill="x", pady=(2, 10))
+        ctk.CTkLabel(panel, text="UPDATE AVAILABLE", font=("Segoe UI", 9, "bold"),
+                     text_color=COLOR_ACCENT, anchor="w").pack(fill="x", padx=20, pady=(18, 2))
+        ctk.CTkLabel(panel, text=f"{latest_tag} is available (current: v{__version__})",
+                     font=FONT_BODY, text_color=COLOR_TEXT_MAIN, anchor="w").pack(fill="x", padx=20, pady=(0, 4))
+        status_var = tk.StringVar(value="")
+        ctk.CTkLabel(panel, textvariable=status_var, font=FONT_BODY, text_color=COLOR_TEXT_SUB,
+                     anchor="w", wraplength=460, justify="left").pack(fill="x", padx=20, pady=(0, 10))
+
+        def start_install():
+            if not installer_url:
+                webbrowser.open(release_url)
+                return
+            install_btn.configure(state="disabled", text="Downloading...")
+            status_var.set("")
+
+            def worker():
+                try:
+                    req = urllib.request.Request(installer_url, headers={"User-Agent": "AudioSwitcher-update-check"})
+                    installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
+                    with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
+                        f.write(resp.read())
+                    os.startfile(installer_path)
+                    root.after(0, lambda: status_var.set("Installer launched — this window will close shortly."))
+                except Exception as e:
+                    log_error("settings_download_installer", e)
+
+                    def on_fail():
+                        install_btn.configure(state="normal", text="Open release page",
+                                               command=lambda: webbrowser.open(release_url))
+                        status_var.set("Download failed. Click to open the release page instead.")
+                    root.after(0, on_fail)
+            threading.Thread(target=worker, daemon=True).start()
+
+        install_btn = ctk.CTkButton(
+            panel, text="Download & Install", command=start_install,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_BG,
+            corner_radius=8, font=FONT_LABEL, height=36,
+        )
+        install_btn.pack(fill="x", padx=20, pady=(0, 20))
+
+    def _poll_update_info_queue():
+        try:
+            latest_tag, release_url, installer_url = _update_info_queue.get_nowait()
+            _add_update_tab(latest_tag, release_url, installer_url)
+            return
+        except queue.Empty:
+            pass
+        root.after(500, _poll_update_info_queue)
+
+    _check_for_update_tab()
+    root.after(500, _poll_update_info_queue)
 
     # ルーティング・インジケーター（現在どちらのレイヤーがアクティブかをパッチベイ風に表示）
     indicator_panel = ctk.CTkFrame(tab_general, fg_color=COLOR_PANEL, corner_radius=14,
