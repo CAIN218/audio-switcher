@@ -7,7 +7,7 @@
 ; (dist\AudioSwitcher.exe must already exist -- run PyInstaller first.)
 
 #define MyAppName "AudioSwitcher"
-#define MyAppVersion "1.5.1"
+#define MyAppVersion "1.5.2"
 #define MyAppPublisher "Yuga Tanaka"
 #define MyAppURL "https://github.com/CAIN218/audio-switcher"
 #define MyAppExeName "AudioSwitcher.exe"
@@ -179,6 +179,13 @@ begin
   begin
     UninstallString := RemoveQuotes(UninstallString);
     Exec(UninstallString, '/VERYSILENT /SUPPRESSMSGBOX /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // アンインストーラー(unins000.exe)は自分自身を一時フォルダにコピーして
+    // 実際の削除処理をそちらに引き継ぐため、ewWaitUntilTerminatedで待てる
+    // のは最初のプロセスの終了までで、スタートメニューのフォルダ削除等の
+    // 実際のクリーンアップはその後も少し続く。これと後続の[Icons]作成が
+    // 競合すると"IPersistFile::Save failed"で新バージョンのインストール
+    // ごと失敗する(実際に発生した不具合)。少し待って確実に完了させる。
+    Sleep(2000);
   end;
 end;
 

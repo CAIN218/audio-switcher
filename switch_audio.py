@@ -33,7 +33,7 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -2100,7 +2100,6 @@ def open_setting_window():
         win = ctk.CTkToplevel(root)
         win.title("Welcome to AudioSwitcher")
         win.resizable(False, False)
-        win.attributes("-topmost", True)
         win.transient(root)
         # 閉じる方法は下部の"Skip"だけにしたいので、タイトルバーの×では
         # 閉じられないようにする(WM_DELETE_WINDOWを無視するだけにする)。
