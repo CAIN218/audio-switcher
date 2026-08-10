@@ -425,15 +425,25 @@ class _ToastManager:
         canvas.create_rectangle(0, 12, 4, self.HEIGHT - 12, fill=COLOR_ACCENT, outline="")
         canvas.create_text(22, 22, anchor="w", text="UPDATE AVAILABLE",
                             fill=COLOR_ACCENT, font=("Segoe UI", 8, "bold"))
-        subtitle = f"{latest_tag} — click to install" if installer_url else f"{latest_tag} — click to view"
+        auto = self.auto_update_enabled and installer_url
+        if auto:
+            subtitle = f"{latest_tag} — installing automatically..."
+        elif installer_url:
+            subtitle = f"{latest_tag} — click to install"
+        else:
+            subtitle = f"{latest_tag} — click to view"
         self._update_subtitle_id = canvas.create_text(22, 44, anchor="w", text=subtitle,
                                                         fill=COLOR_TEXT_MAIN, font=("Segoe UI", 10, "bold"))
-        canvas.configure(cursor="hand2")
 
         self._pending_release_url = release_url
-        if installer_url:
+        if auto:
+            canvas.configure(cursor="")
+            self.on_click = None
+        elif installer_url:
+            canvas.configure(cursor="hand2")
             self.on_click = lambda: self._begin_update_download(installer_url, release_url)
         else:
+            canvas.configure(cursor="hand2")
             self.on_click = lambda: webbrowser.open(release_url)
         self._hold_ms = 8000
         self._place_bottom_right()
@@ -441,6 +451,9 @@ class _ToastManager:
         self._place_bottom_right()
         self.current_alpha = 0.0
         self._fade_in()
+
+        if auto:
+            self._begin_update_download(installer_url, release_url)
 
     def _begin_update_download(self, installer_url, release_url):
         """アップデート通知がクリックされたら、インストーラーをバックグラ
@@ -458,7 +471,7 @@ class _ToastManager:
         except Exception:
             pass
         threading.Thread(target=_download_and_launch_installer,
-                          args=(installer_url, release_url, self.auto_update_enabled), daemon=True).start()
+                          args=(installer_url, release_url), daemon=True).start()
 
     def _finish_update_download(self, ok):
         """ダウンロード完了(成功/失敗)を受けて表示を更新する。失敗時は
@@ -466,8 +479,7 @@ class _ToastManager:
         try:
             if self._update_subtitle_id is not None and self.canvas is not None:
                 if ok:
-                    msg = "Installing update — AudioSwitcher will restart automatically." if self.auto_update_enabled \
-                        else "Installer launched — continuing setup..."
+                    msg = "Installing update — AudioSwitcher will restart automatically."
                     self.canvas.itemconfigure(self._update_subtitle_id, text=msg)
                 else:
                     self.canvas.itemconfigure(self._update_subtitle_id, text="Download failed — click to view")
@@ -787,14 +799,11 @@ def _update_check_loop():
         time.sleep(24 * 60 * 60)
 
 
-def _download_and_launch_installer(installer_url, release_url, silent=False):
-    """アップデート通知のクリックを受けて、インストーラーをダウンロードし
-    自動起動する(ダブルクリックで実行するのと同じ)。起動したインストーラー
-    自身が現在動作中のこのプロセスを終了・上書きインストールしてくれるため、
-    ここでは起動するところまでで良い。silent=Trueの場合はウィザード画面を
-    出さず、ソフトウェアアップデートのように無人でインストールし直後に
-    アプリを再起動する(installer.iss側の[Run]がpostinstallに反応して
-    サイレントインストール後も起動し直す)。ネットワークエラー等は結果を
+def _download_and_launch_installer(installer_url, release_url):
+    """アップデート通知のクリック(または自動更新)を受けて、インストーラー
+    をダウンロードし、ウィザード画面を出さずサイレントインストールする。
+    installer.iss側の[Code]がサイレント時も明示的にアプリを再起動するので、
+    ここでは起動するところまでで良い。ネットワークエラー等は結果を
     _install_status_queue経由でメインスレッドに伝え、失敗時はリリース
     ページを開くフォールバックに切り替えてもらう。"""
     try:
@@ -802,10 +811,7 @@ def _download_and_launch_installer(installer_url, release_url, silent=False):
         installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
         with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
             f.write(resp.read())
-        if silent:
-            os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
-        else:
-            os.startfile(installer_path)
+        os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
         _install_status_queue.put(("done", None))
     except Exception as e:
         log_error("download_installer", e)
@@ -1030,6 +1036,10 @@ def open_setting_window():
     ctk.set_appearance_mode("dark")
 
     root = ctk.CTk(fg_color=COLOR_BG)
+    # UPDATEタブの中に置くスイッチだが、変数自体はSave時に他の設定と一緒に
+    # 保存する必要があるので、タブの有無に関わらずここで(root作成後に)
+    # 用意しておく(StringVarはデフォルトのTkルートが無いと作れないため)。
+    auto_update_var = tk.StringVar(value=saved_auto_update)
     root.title("AudioSwitcher")
     root.geometry("560x600")
     root.resizable(False, False)
@@ -1183,11 +1193,14 @@ def open_setting_window():
         ctk.CTkLabel(panel, textvariable=status_var, font=FONT_BODY, text_color=COLOR_TEXT_SUB,
                      anchor="w", wraplength=460, justify="left").pack(fill="x", padx=20, pady=(0, 10))
 
+        # インストール自体は(ONでもOFFでも)常にウィザードなしのサイレント
+        # インストールで行う。ONは何もしなくても自動でこれが走り、OFFは
+        # このタブでボタンを押すことがそのトリガーになる、という違いだけ。
         def start_install():
             if not installer_url:
                 webbrowser.open(release_url)
                 return
-            install_btn.configure(state="disabled", text="Downloading...")
+            install_btn.configure(state="disabled", text="Updating...")
             status_var.set("")
 
             def worker():
@@ -1196,12 +1209,8 @@ def open_setting_window():
                     installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
                     with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
                         f.write(resp.read())
-                    if auto_update_var.get() == "1":
-                        os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
-                        msg = "Installing update in the background — AudioSwitcher will restart automatically."
-                    else:
-                        os.startfile(installer_path)
-                        msg = "Installer launched — this window will close shortly."
+                    os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
+                    msg = "Installing update in the background — AudioSwitcher will restart automatically."
                     root.after(0, lambda: status_var.set(msg))
                 except Exception as e:
                     log_error("settings_download_installer", e)
@@ -1213,12 +1222,32 @@ def open_setting_window():
                     root.after(0, on_fail)
             threading.Thread(target=worker, daemon=True).start()
 
+        auto_row = ctk.CTkFrame(panel, fg_color="transparent")
+        auto_row.pack(fill="x", padx=20, pady=(0, 12))
+
+        def on_auto_toggle():
+            if auto_update_var.get() == "1" and installer_url:
+                start_install()
+
+        switch_auto_update = ctk.CTkSwitch(
+            auto_row, text="Auto-update (always stay on the latest version)",
+            variable=auto_update_var, onvalue="1", offvalue="0", command=on_auto_toggle,
+            font=FONT_BODY, text_color=COLOR_TEXT_SUB,
+            fg_color=COLOR_INPUT, progress_color=COLOR_ACCENT,
+            button_color=COLOR_TEXT_MAIN, button_hover_color=COLOR_ACCENT_HOVER,
+        )
+        switch_auto_update.pack(side="left", anchor="w")
+
         install_btn = ctk.CTkButton(
             panel, text="Download & Install", command=start_install,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_BG,
             corner_radius=8, font=FONT_LABEL, height=36,
         )
         install_btn.pack(fill="x", padx=20, pady=(0, 20))
+
+        # ONならこのタブが開かれた時点で(クリック不要で)即座に更新を始める。
+        if auto_update_var.get() == "1" and installer_url:
+            start_install()
 
     def _poll_update_info_queue():
         try:
@@ -1426,15 +1455,6 @@ def open_setting_window():
         button_color=COLOR_TEXT_MAIN, button_hover_color=COLOR_ACCENT_HOVER,
     )
     switch_startup.pack(side="left", anchor="w")
-
-    auto_update_var = tk.StringVar(value=saved_auto_update)
-    switch_auto_update = ctk.CTkSwitch(
-        bottom_bar, text="Auto-update", variable=auto_update_var, onvalue="1", offvalue="0",
-        font=FONT_BODY, text_color=COLOR_TEXT_SUB,
-        fg_color=COLOR_INPUT, progress_color=COLOR_ACCENT,
-        button_color=COLOR_TEXT_MAIN, button_hover_color=COLOR_ACCENT_HOVER,
-    )
-    switch_auto_update.pack(side="left", anchor="w", padx=(18, 0))
 
     btn_frame = ctk.CTkFrame(bottom_bar, fg_color="transparent")
     btn_frame.pack(side="right")
