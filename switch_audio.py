@@ -11,6 +11,7 @@ import threading
 import queue
 import ctypes
 import json
+import tempfile
 import urllib.request
 import webbrowser
 import winshell
@@ -32,7 +33,7 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 
-__version__ = "1.2.2"
+__version__ = "1.3.0"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -290,6 +291,8 @@ class _ToastManager:
         self._hold_ms = 2600
         self._device_font = tkfont.Font(root=root, family=self.DEVICE_FONT[0],
                                          size=self.DEVICE_FONT[1], weight=self.DEVICE_FONT[2])
+        self._update_subtitle_id = None
+        self._pending_release_url = None
 
     def _ensure_window(self):
         if self.window is not None:
@@ -362,6 +365,7 @@ class _ToastManager:
         canvas.configure(cursor="")
 
         self.on_click = None
+        self._update_subtitle_id = None
         self._hold_ms = 2600
         self._place_bottom_right()
         self.window.deiconify()
@@ -398,10 +402,11 @@ class _ToastManager:
 
         self.marquee_job = self.root.after(40, tick)
 
-    def show_update_available(self, latest_tag, release_url):
-        """新しいバージョンが見つかった時の控えめな通知。クリックでリリース
-        ページを開く。頻繁に出るものではないので、通常のトーストより長めに
-        表示したままにする。"""
+    def show_update_available(self, latest_tag, release_url, installer_url=None):
+        """新しいバージョンが見つかった時の控えめな通知。installer_urlがあれば
+        クリックでインストーラーを直接ダウンロード・自動起動する。なければ
+        (ポータブル版のみのリリース等)従来通りリリースページを開く。頻繁に
+        出るものではないので、通常のトーストより長めに表示したままにする。"""
         self._ensure_window()
         if self.fade_job:
             self.root.after_cancel(self.fade_job)
@@ -417,17 +422,58 @@ class _ToastManager:
         canvas.create_rectangle(0, 12, 4, self.HEIGHT - 12, fill=COLOR_ACCENT, outline="")
         canvas.create_text(22, 22, anchor="w", text="UPDATE AVAILABLE",
                             fill=COLOR_ACCENT, font=("Segoe UI", 8, "bold"))
-        canvas.create_text(22, 44, anchor="w", text=f"{latest_tag} — click to view",
-                            fill=COLOR_TEXT_MAIN, font=("Segoe UI", 10, "bold"))
+        subtitle = f"{latest_tag} — click to install" if installer_url else f"{latest_tag} — click to view"
+        self._update_subtitle_id = canvas.create_text(22, 44, anchor="w", text=subtitle,
+                                                        fill=COLOR_TEXT_MAIN, font=("Segoe UI", 10, "bold"))
         canvas.configure(cursor="hand2")
 
-        self.on_click = lambda: webbrowser.open(release_url)
+        self._pending_release_url = release_url
+        if installer_url:
+            self.on_click = lambda: self._begin_update_download(installer_url, release_url)
+        else:
+            self.on_click = lambda: webbrowser.open(release_url)
         self._hold_ms = 8000
         self._place_bottom_right()
         self.window.deiconify()
         self._place_bottom_right()
         self.current_alpha = 0.0
         self._fade_in()
+
+    def _begin_update_download(self, installer_url, release_url):
+        """アップデート通知がクリックされたら、インストーラーをバックグラ
+        ウンドでダウンロードして自動起動する。Tkのメインスレッドをブロック
+        しないよう別スレッドに投げ、結果は_install_status_queue経由で
+        poll_toast_queue(メインスレッド)に伝えて表示を更新する。"""
+        if self.fade_job:
+            self.root.after_cancel(self.fade_job)
+            self.fade_job = None
+        self.on_click = None
+        try:
+            self.canvas.configure(cursor="")
+            if self._update_subtitle_id is not None:
+                self.canvas.itemconfigure(self._update_subtitle_id, text="Downloading installer...")
+        except Exception:
+            pass
+        threading.Thread(target=_download_and_launch_installer,
+                          args=(installer_url, release_url), daemon=True).start()
+
+    def _finish_update_download(self, ok):
+        """ダウンロード完了(成功/失敗)を受けて表示を更新する。失敗時は
+        従来通りクリックでリリースページを開けるようにフォールバックする。"""
+        try:
+            if self._update_subtitle_id is not None and self.canvas is not None:
+                if ok:
+                    self.canvas.itemconfigure(self._update_subtitle_id, text="Installer launched — continuing setup...")
+                else:
+                    self.canvas.itemconfigure(self._update_subtitle_id, text="Download failed — click to view")
+                    self.canvas.configure(cursor="hand2")
+                    self.on_click = lambda: webbrowser.open(self._pending_release_url)
+        except Exception:
+            pass
+        self._hold_ms = 5000
+        if self.fade_job:
+            self.root.after_cancel(self.fade_job)
+        self.fade_job = self.root.after(self._hold_ms, self._fade_out)
 
     def _fade_in(self):
         if self.current_alpha < 0.96:
@@ -694,6 +740,7 @@ def _parse_version(tag):
 
 
 _update_queue = queue.Queue()
+_install_status_queue = queue.Queue()
 
 def _update_check_loop():
     """1日1回、GitHubの最新リリースを確認する。バックグラウンドの常駐
@@ -710,11 +757,36 @@ def _update_check_loop():
                 data = json.loads(resp.read().decode("utf-8"))
             latest_tag = data.get("tag_name", "")
             release_url = data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
+            installer_url = None
+            for asset in data.get("assets", []) or []:
+                name = asset.get("name", "")
+                if name.lower().startswith("audioswitcher-setup") and name.lower().endswith(".exe"):
+                    installer_url = asset.get("browser_download_url")
+                    break
             if latest_tag and _parse_version(latest_tag) > _parse_version(__version__):
-                _update_queue.put((latest_tag, release_url))
+                _update_queue.put((latest_tag, release_url, installer_url))
         except Exception as e:
             log_error("update_check", e)
         time.sleep(24 * 60 * 60)
+
+
+def _download_and_launch_installer(installer_url, release_url):
+    """アップデート通知のクリックを受けて、インストーラーをダウンロードし
+    自動起動する(ダブルクリックで実行するのと同じ)。起動したインストーラー
+    自身が現在動作中のこのプロセスを終了・上書きインストールしてくれるため、
+    ここでは起動するところまでで良い。ネットワークエラー等は結果を
+    _install_status_queue経由でメインスレッドに伝え、失敗時はリリース
+    ページを開くフォールバックに切り替えてもらう。"""
+    try:
+        req = urllib.request.Request(installer_url, headers={"User-Agent": "AudioSwitcher-update-check"})
+        installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
+        with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
+            f.write(resp.read())
+        os.startfile(installer_path)
+        _install_status_queue.put(("done", None))
+    except Exception as e:
+        log_error("download_installer", e)
+        _install_status_queue.put(("error", release_url))
 
 
 _switch_request_queue = queue.Queue()
@@ -873,12 +945,23 @@ def start_backend():
 
         try:
             while True:
-                latest_tag, release_url = _update_queue.get_nowait()
-                toast_manager.show_update_available(latest_tag, release_url)
+                latest_tag, release_url, installer_url = _update_queue.get_nowait()
+                toast_manager.show_update_available(latest_tag, release_url, installer_url)
         except queue.Empty:
             pass
         except Exception as e:
             log_error("poll_update_queue", e)
+
+        try:
+            while True:
+                status, payload = _install_status_queue.get_nowait()
+                if status == "error" and payload:
+                    toast_manager._pending_release_url = payload
+                toast_manager._finish_update_download(status == "done")
+        except queue.Empty:
+            pass
+        except Exception as e:
+            log_error("poll_install_status_queue", e)
 
         try:
             while True:

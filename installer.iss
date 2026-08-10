@@ -7,7 +7,7 @@
 ; (dist\AudioSwitcher.exe must already exist -- run PyInstaller first.)
 
 #define MyAppName "AudioSwitcher"
-#define MyAppVersion "1.2.2"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "Yuga Tanaka"
 #define MyAppURL "https://github.com/CAIN218/audio-switcher"
 #define MyAppExeName "AudioSwitcher.exe"
@@ -63,6 +63,11 @@ Type: files; Name: "{app}\error.log"
 Type: files; Name: "{userstartup}\AudioSwitcher.lnk"
 
 [Code]
+var
+  UpgradePage: TOutputMsgWizardPage;
+  BackupConfigPath: String;
+  RestoreStartupShortcut: Boolean;
+
 procedure KillAudioSwitcher;
 var
   ResultCode: Integer;
@@ -72,6 +77,122 @@ begin
   // ビルドは親子2プロセスになるため、片方だけ終了しても残ることがある)。
   // インストール・アンインストールの両方で必ず終了させておく。
   Exec('taskkill.exe', '/F /IM AudioSwitcher.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+// AppIdは[Setup]のAppId={{D9F6B52A-3022-493B-B980-0EBA2C1EB140}と同じ値
+// (Inno Setupが自動でこのGUID+"_is1"というキー名でアンインストール情報を
+// HKCUに登録するため、ここでも同じ文字列を使って探しに行く)。
+function GetUninstallString(): String;
+var
+  UninstallKey: String;
+  Value: String;
+begin
+  UninstallKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{D9F6B52A-3022-493B-B980-0EBA2C1EB140}_is1';
+  Value := '';
+  RegQueryStringValue(HKCU, UninstallKey, 'UninstallString', Value);
+  Result := Value;
+end;
+
+function IsUpgrade(): Boolean;
+begin
+  Result := (GetUninstallString() <> '');
+end;
+
+// 旧バージョンの実際のインストール先。ユーザーがディレクトリ選択ページで
+// 前回と違うフォルダを選んだ場合、今回のセッションの{app}とは一致しない
+// ことがあるため、app_config.txtの退避元は必ずレジストリのInstallLocation
+// (旧バージョン自身が書き込んだ値)から求める。
+function GetOldInstallLocation(): String;
+var
+  UninstallKey: String;
+  Value: String;
+begin
+  UninstallKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{D9F6B52A-3022-493B-B980-0EBA2C1EB140}_is1';
+  Value := '';
+  RegQueryStringValue(HKCU, UninstallKey, 'InstallLocation', Value);
+  Result := Value;
+end;
+
+procedure InitializeWizard();
+begin
+  // 既存バージョンが見つかった時だけ表示するお知らせページ
+  // (見つからない場合はShouldSkipPageで自動的に飛ばす)。
+  UpgradePage := CreateOutputMsgPage(wpWelcome,
+    'Existing Installation Found',
+    'A previous version of AudioSwitcher will be removed',
+    'Setup has detected a previous version of AudioSwitcher already installed on this computer.'
+    + #13#10 + #13#10 +
+    'It will be automatically uninstalled before the new version is installed. Your device and hotkey settings will not be affected.');
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if PageID = UpgradePage.ID then
+    Result := not IsUpgrade();
+end;
+
+procedure RecreateStartupShortcut();
+var
+  WshShell: Variant;
+  Shortcut: Variant;
+begin
+  // manage_startup()がPython側で作るショートカットと全く同じ内容
+  // (Targetpath/Arguments/WorkingDirectory/IconLocation)で作り直す。
+  try
+    WshShell := CreateOleObject('WScript.Shell');
+    Shortcut := WshShell.CreateShortcut(ExpandConstant('{userstartup}\AudioSwitcher.lnk'));
+    Shortcut.TargetPath := ExpandConstant('{app}\{#MyAppExeName}');
+    Shortcut.Arguments := '/background';
+    Shortcut.WorkingDirectory := ExpandConstant('{app}');
+    Shortcut.IconLocation := ExpandConstant('{app}\{#MyAppExeName}');
+    Shortcut.Save;
+  except
+  end;
+end;
+
+procedure UninstallOldVersion();
+var
+  OldDir: String;
+  UninstallString: String;
+  ResultCode: Integer;
+begin
+  // 実際に使われている旧バージョンのアンインストーラーは[UninstallDelete]で
+  // app_config.txtとスタートアップフォルダのショートカットも消してしまう。
+  // アップグレードのつもりが設定やStart on bootが消えては困るので、実行前に
+  // 退避しておき、新バージョンのインストール完了後(ssPostInstall)に戻す。
+  BackupConfigPath := '';
+  OldDir := GetOldInstallLocation();
+  if (OldDir <> '') and FileExists(AddBackslash(OldDir) + 'app_config.txt') then
+  begin
+    BackupConfigPath := ExpandConstant('{tmp}\app_config.txt.bak');
+    CopyFile(AddBackslash(OldDir) + 'app_config.txt', BackupConfigPath, False);
+  end;
+  RestoreStartupShortcut := FileExists(ExpandConstant('{userstartup}\AudioSwitcher.lnk'));
+
+  UninstallString := GetUninstallString();
+  if UninstallString <> '' then
+  begin
+    UninstallString := RemoveQuotes(UninstallString);
+    Exec(UninstallString, '/VERYSILENT /SUPPRESSMSGBOX /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssInstall) and IsUpgrade() then
+    UninstallOldVersion();
+
+  if CurStep = ssPostInstall then
+  begin
+    if (BackupConfigPath <> '') and FileExists(BackupConfigPath) then
+    begin
+      CopyFile(BackupConfigPath, ExpandConstant('{app}\app_config.txt'), False);
+      DeleteFile(BackupConfigPath);
+    end;
+    if RestoreStartupShortcut then
+      RecreateStartupShortcut();
+  end;
 end;
 
 function InitializeSetup(): Boolean;
