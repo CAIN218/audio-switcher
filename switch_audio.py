@@ -33,7 +33,7 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
