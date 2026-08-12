@@ -19,7 +19,8 @@ from win32com.client import Dispatch
 
 import comtypes
 from pycaw.pycaw import AudioUtilities
-from pycaw.constants import DEVICE_STATE, EDataFlow, ERole
+from pycaw.api.policyconfig import IPolicyConfig
+from pycaw.constants import DEVICE_STATE, EDataFlow, ERole, CLSID_CPolicyConfigClient
 
 # customtkinter（設定画面専用のUIライブラリ）はここでは読み込まない。
 # バックグラウンド常駐時はホットキー監視しかしないため、
@@ -33,7 +34,7 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -131,8 +132,34 @@ def set_default_device_all_roles(target_id):
     はroles未指定だとeConsoleしか設定しない(ドキュメントやコード内の古い
     コメントとは異なる実際の挙動)ため、明示的に3ロール全てを渡す必要が
     ある。eCommunicationsを設定しないと、Discordのように「既定の通信
-    デバイス」を優先して追従するアプリが切り替わらない。"""
-    AudioUtilities.SetDefaultDevice(target_id, roles=[ERole.eConsole, ERole.eMultimedia, ERole.eCommunications])
+    デバイス」を優先して追従するアプリが切り替わらない。
+    各ロールのSetDefaultEndpoint呼び出しは1回あたり数十ms かかる(COM
+    オブジェクトの生成コストではなく、Windows Audioサービス側の処理自体が
+    重い)ことが実測でわかったため、逐次3回呼ぶと切り替えの体感遅延が目立つ。
+    各ロールを別スレッド(別COMアパートメント)で並列に呼び、合計の実時間を
+    縮める。"""
+    errors = []
+
+    def _set_role(role):
+        comtypes.CoInitialize()
+        try:
+            policy_config = comtypes.CoCreateInstance(
+                CLSID_CPolicyConfigClient, IPolicyConfig, comtypes.CLSCTX_ALL
+            )
+            policy_config.SetDefaultEndpoint(target_id, role.value)
+        except Exception as e:
+            errors.append(e)
+        finally:
+            comtypes.CoUninitialize()
+
+    threads = [threading.Thread(target=_set_role, args=(role,))
+               for role in (ERole.eConsole, ERole.eMultimedia, ERole.eCommunications)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errors:
+        raise errors[0]
 
 
 def get_device_info():
