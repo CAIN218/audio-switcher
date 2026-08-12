@@ -4,6 +4,7 @@ release_package/
 installer_output/
 __pycache__/
 app_config.txt
+update_notice.json
 error.log
 *.pyc
 *.iss.bak

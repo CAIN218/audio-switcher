@@ -34,7 +34,7 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "app_config.txt")
 ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 
-__version__ = "1.5.3"
+__version__ = "1.6.0"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -205,8 +205,10 @@ def load_config():
     後から追加した項目なので、無い場合はデフォルト値にフォールバックし、
     古い設定ファイルもそのまま読み込めるようにしている。A/Bトグルは元々
     常に有効だった機能なので、値が無い場合のデフォルトは"1"(有効)にして
-    既存ユーザーの挙動を変えないようにしている。自動更新も同様に既定は
-    "1"(有効)。"""
+    既存ユーザーの挙動を変えないようにしている。自動更新は、インストール
+    直後に(既にそれより新しいリリースが存在していた場合)開いた瞬間に
+    無言で更新・再起動されると初回体験として驚かせてしまうため、既定は
+    "0"(無効)にしている。"""
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             lines = f.read().splitlines()
@@ -217,11 +219,11 @@ def load_config():
         overlay_key = lines[4] if len(lines) > 4 else DEFAULT_OVERLAY_HOTKEY
         overlay_enabled = lines[5] if len(lines) > 5 else "0"
         ab_enabled = lines[6] if len(lines) > 6 else "1"
-        auto_update_enabled = lines[7] if len(lines) > 7 else "1"
+        auto_update_enabled = lines[7] if len(lines) > 7 else "0"
         return dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled, auto_update_enabled
-    return "", "", "ctrl+alt+a", "0", DEFAULT_OVERLAY_HOTKEY, "0", "1", "1"
+    return "", "", "ctrl+alt+a", "0", DEFAULT_OVERLAY_HOTKEY, "0", "1", "0"
 
-def save_config(dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled, auto_update_enabled="1"):
+def save_config(dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled, auto_update_enabled="0"):
     """設定ファイルの保存とスタートアップ制御"""
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         f.write(f"{dev_a}\n{dev_b}\n{key}\n{startup_val}\n{overlay_key}\n{overlay_enabled}\n{ab_enabled}\n{auto_update_enabled}")
@@ -316,6 +318,7 @@ def _rounded_rect(cv, x1, y1, x2, y2, r, **kwargs):
 # やり直すことでインタプリタの再生成を避ける。
 class _ToastManager:
     WIDTH, HEIGHT = 320, 68
+    WHATSNEW_WIDTH, WHATSNEW_HEIGHT = 340, 260
 
     DEVICE_FONT = ("Segoe UI", 10, "bold")
 
@@ -333,6 +336,10 @@ class _ToastManager:
         self._update_subtitle_id = None
         self._pending_release_url = None
         self.auto_update_enabled = True
+        self.whatsnew_window = None
+        self.whatsnew_canvas = None
+        self.whatsnew_alpha = 0.0
+        self.whatsnew_fade_job = None
 
     def _ensure_window(self):
         if self.window is not None:
@@ -442,7 +449,7 @@ class _ToastManager:
 
         self.marquee_job = self.root.after(40, tick)
 
-    def show_update_available(self, latest_tag, release_url, installer_url=None):
+    def show_update_available(self, latest_tag, release_url, installer_url=None, notes=""):
         """新しいバージョンが見つかった時の控えめな通知。installer_urlがあれば
         クリックでインストーラーを直接ダウンロード・自動起動する。なければ
         (ポータブル版のみのリリース等)従来通りリリースページを開く。頻繁に
@@ -478,7 +485,7 @@ class _ToastManager:
             self.on_click = None
         elif installer_url:
             canvas.configure(cursor="hand2")
-            self.on_click = lambda: self._begin_update_download(installer_url, release_url)
+            self.on_click = lambda: self._begin_update_download(installer_url, release_url, latest_tag, notes)
         else:
             canvas.configure(cursor="hand2")
             self.on_click = lambda: webbrowser.open(release_url)
@@ -490,9 +497,9 @@ class _ToastManager:
         self._fade_in()
 
         if auto:
-            self._begin_update_download(installer_url, release_url)
+            self._begin_update_download(installer_url, release_url, latest_tag, notes)
 
-    def _begin_update_download(self, installer_url, release_url):
+    def _begin_update_download(self, installer_url, release_url, latest_tag="", notes=""):
         """アップデート通知がクリックされたら、インストーラーをバックグラ
         ウンドでダウンロードして自動起動する。Tkのメインスレッドをブロック
         しないよう別スレッドに投げ、結果は_install_status_queue経由で
@@ -508,7 +515,7 @@ class _ToastManager:
         except Exception:
             pass
         threading.Thread(target=_download_and_launch_installer,
-                          args=(installer_url, release_url), daemon=True).start()
+                          args=(installer_url, release_url, latest_tag, notes), daemon=True).start()
 
     def _finish_update_download(self, ok):
         """ダウンロード完了(成功/失敗)を受けて表示を更新する。失敗時は
@@ -548,6 +555,106 @@ class _ToastManager:
             if self.marquee_job:
                 self.root.after_cancel(self.marquee_job)
                 self.marquee_job = None
+
+    def _ensure_whatsnew_window(self):
+        if self.whatsnew_window is not None:
+            return
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.attributes("-alpha", 0.0)
+
+        transparent_key = "#010203"
+        win.configure(bg=transparent_key)
+        win.attributes("-transparentcolor", transparent_key)
+
+        canvas = tk.Canvas(win, width=self.WHATSNEW_WIDTH, height=self.WHATSNEW_HEIGHT,
+                            bg=transparent_key, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+        canvas.bind("<Button-1>", lambda e: self._dismiss_whats_new())
+        win.withdraw()
+
+        self.whatsnew_window = win
+        self.whatsnew_canvas = canvas
+
+    def _place_whatsnew_bottom_right(self):
+        try:
+            left, top, right, bottom = _active_monitor_work_area()
+        except Exception:
+            left, top = 0, 0
+            right = self.whatsnew_window.winfo_screenwidth()
+            bottom = self.whatsnew_window.winfo_screenheight()
+        x = right - self.WHATSNEW_WIDTH - 16
+        y = bottom - self.WHATSNEW_HEIGHT - 6
+        self.whatsnew_window.geometry(f"{self.WHATSNEW_WIDTH}x{self.WHATSNEW_HEIGHT}+{x}+{y}")
+
+    def show_whats_new(self, version, notes):
+        """アップデート直後に一度だけ、他のトーストと同じ見た目(角丸パネル・
+        アクセントバー・フェード)のポップアップとして変更内容を表示する。
+        設定画面を開かせたくない、という指摘を受けて、通知の仕組みを流用
+        する形にした。内容を読む時間が必要なので自動では消さず、クリックで
+        閉じる。"""
+        self._ensure_whatsnew_window()
+        if self.whatsnew_fade_job:
+            self.root.after_cancel(self.whatsnew_fade_job)
+            self.whatsnew_fade_job = None
+
+        canvas = self.whatsnew_canvas
+        canvas.delete("all")
+        W, H = self.WHATSNEW_WIDTH, self.WHATSNEW_HEIGHT
+        _rounded_rect(canvas, 1, 1, W - 1, H - 1, 16, fill=COLOR_PANEL, outline=COLOR_BORDER, width=1)
+        canvas.create_rectangle(0, 12, 4, H - 12, fill=COLOR_ACCENT, outline="")
+        canvas.create_text(22, 24, anchor="w", text="UPDATED",
+                            fill=COLOR_ACCENT, font=("Segoe UI", 8, "bold"))
+        canvas.create_text(22, 46, anchor="w", text=f"Now on {version}",
+                            fill=COLOR_TEXT_MAIN, font=("Segoe UI", 13, "bold"))
+        body = (notes or "").strip() or "No release notes."
+        # Markdownの見出し記号(##)や箇条書き(-)は簡単な見た目調整だけして
+        # そのまま表示する(フルレンダリングまではしない)。
+        lines = []
+        for raw in body.splitlines():
+            line = raw.strip()
+            if line.startswith("## "):
+                lines.append(line[3:].upper())
+            elif line.startswith("- "):
+                lines.append("•  " + line[2:])
+            elif line:
+                lines.append(line)
+        display_text = "\n".join(lines[:10]) or "No release notes."
+        canvas.create_text(22, 72, anchor="nw", text=display_text,
+                            fill=COLOR_TEXT_SUB, font=("Segoe UI", 9), width=W - 44)
+        canvas.create_text(W - 20, H - 18, anchor="e", text="Got it ✕",
+                            fill=COLOR_TEXT_FAINT, font=("Segoe UI", 9, "bold"))
+        canvas.configure(cursor="hand2")
+
+        self._place_whatsnew_bottom_right()
+        self.whatsnew_window.deiconify()
+        self._place_whatsnew_bottom_right()
+        self.whatsnew_alpha = 0.0
+        self._whatsnew_fade_in()
+
+    def _dismiss_whats_new(self):
+        if self.whatsnew_fade_job:
+            self.root.after_cancel(self.whatsnew_fade_job)
+            self.whatsnew_fade_job = None
+        self._whatsnew_fade_out()
+
+    def _whatsnew_fade_in(self):
+        if self.whatsnew_alpha < 0.97:
+            self.whatsnew_alpha += 0.12
+            self.whatsnew_window.attributes("-alpha", min(self.whatsnew_alpha, 0.97))
+            self.whatsnew_fade_job = self.root.after(15, self._whatsnew_fade_in)
+        else:
+            self.whatsnew_fade_job = None
+
+    def _whatsnew_fade_out(self):
+        if self.whatsnew_alpha > 0.0:
+            self.whatsnew_alpha -= 0.08
+            self.whatsnew_window.attributes("-alpha", max(self.whatsnew_alpha, 0.0))
+            self.whatsnew_fade_job = self.root.after(15, self._whatsnew_fade_out)
+        else:
+            self.whatsnew_window.withdraw()
+            self.whatsnew_fade_job = None
 
 
 # ----------------------------------------------------------------------
@@ -799,9 +906,11 @@ _install_status_queue = queue.Queue()
 
 def _fetch_latest_release_info():
     """GitHubの最新リリースを確認する。__version__より新しい場合だけ
-    (latest_tag, release_url, installer_url)を返し、そうでなければNoneを
-    返す。バックグラウンドの定期チェックと、設定画面を開くたびの即時チェック
-    の両方から共通で使う。呼び出し側で例外を処理すること。"""
+    (latest_tag, release_url, installer_url, notes)を返し、そうでなければ
+    Noneを返す。notesはリリースの説明文(Markdown、gh release createの
+    --notesで書いた内容)で、アップデート後の「What's New」表示に使う。
+    バックグラウンドの定期チェックと、設定画面を開くたびの即時チェックの
+    両方から共通で使う。呼び出し側で例外を処理すること。"""
     req = urllib.request.Request(
         f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
         headers={"Accept": "application/vnd.github+json", "User-Agent": "AudioSwitcher-update-check"},
@@ -810,6 +919,7 @@ def _fetch_latest_release_info():
         data = json.loads(resp.read().decode("utf-8"))
     latest_tag = data.get("tag_name", "")
     release_url = data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
+    notes = data.get("body") or ""
     installer_url = None
     for asset in data.get("assets", []) or []:
         name = asset.get("name", "")
@@ -817,7 +927,7 @@ def _fetch_latest_release_info():
             installer_url = asset.get("browser_download_url")
             break
     if latest_tag and _parse_version(latest_tag) > _parse_version(__version__):
-        return (latest_tag, release_url, installer_url)
+        return (latest_tag, release_url, installer_url, notes)
     return None
 
 
@@ -836,7 +946,44 @@ def _update_check_loop():
         time.sleep(24 * 60 * 60)
 
 
-def _download_and_launch_installer(installer_url, release_url):
+UPDATE_NOTICE_FILE = os.path.join(BASE_DIR, "update_notice.json")
+
+
+def _write_update_notice(latest_tag, notes):
+    """再起動後の新バージョンが「What's New」を表示できるよう、更新前の
+    バージョンが自分で情報を書き残しておく。再インストール後もこのファイル
+    自体は([Files]/[UninstallDelete]どちらにも入っていないので)そのまま
+    残る。書き込みに失敗しても更新自体は継続する(What's Newが出ないだけ)。"""
+    try:
+        with open(UPDATE_NOTICE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"version": latest_tag, "notes": notes}, f, ensure_ascii=False)
+    except Exception as e:
+        log_error("write_update_notice", e)
+
+
+def _read_pending_update_notice():
+    """起動時に一度だけ呼ぶ。前回の更新時に書き残されたUPDATE_NOTICE_FILEが
+    あれば(version, notes)を返してすぐ削除する(次回からは出さない)。無ければ
+    None。常駐モード(start_backend)・設定画面(open_setting_window)の両方の
+    起動経路から共通で使う。"""
+    if not os.path.exists(UPDATE_NOTICE_FILE):
+        return None
+    try:
+        with open(UPDATE_NOTICE_FILE, "r", encoding="utf-8") as f:
+            notice = json.load(f)
+    except Exception as e:
+        log_error("read_update_notice", e)
+        notice = None
+    try:
+        os.remove(UPDATE_NOTICE_FILE)
+    except Exception:
+        pass
+    if not notice:
+        return None
+    return notice.get("version", ""), notice.get("notes", "")
+
+
+def _download_and_launch_installer(installer_url, release_url, latest_tag="", notes=""):
     """アップデート通知のクリック(または自動更新)を受けて、インストーラー
     をダウンロードし、ウィザード画面を出さずサイレントインストールする。
     installer.iss側の[Code]がサイレント時も明示的にアプリを再起動するので、
@@ -848,6 +995,7 @@ def _download_and_launch_installer(installer_url, release_url):
         installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
         with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
             f.write(resp.read())
+        _write_update_notice(latest_tag, notes)
         os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
         _install_status_queue.put(("done", None))
     except Exception as e:
@@ -999,6 +1147,11 @@ def start_backend():
         _direct_switch_queue.put((target_id, name))
     device_overlay.on_select = _on_overlay_select
 
+    pending_notice = _read_pending_update_notice()
+    if pending_notice:
+        version, notes = pending_notice
+        root.after(800, lambda: toast_manager.show_whats_new(version, notes))
+
     def poll_toast_queue():
         try:
             while True:
@@ -1011,8 +1164,8 @@ def start_backend():
 
         try:
             while True:
-                latest_tag, release_url, installer_url = _update_queue.get_nowait()
-                toast_manager.show_update_available(latest_tag, release_url, installer_url)
+                latest_tag, release_url, installer_url, notes = _update_queue.get_nowait()
+                toast_manager.show_update_available(latest_tag, release_url, installer_url, notes)
         except queue.Empty:
             pass
         except Exception as e:
@@ -1084,6 +1237,90 @@ def open_setting_window():
             root.iconbitmap(ICON_PATH)
         except Exception:
             pass
+
+    def show_whats_new_overlay(version, notes):
+        """自動更新(またはUPDATEタブでの更新)の直後に一度だけ、何が変わったか
+        を表示する。別のToplevelを座標合わせして重ねる方式は、設定画面との
+        位置ズレやタスクバーへの別アイコン表示などが繰り返し起きたため、
+        別ウィンドウを一切使わず、設定画面(root)と同じウィンドウの中に直接
+        不透明なフレームを重ねて表示する(常にピクセル単位で一致する)。"""
+        # 余白を残して浮いているカードに見せる(全面に敷き詰めない)。backdropが
+        # rootの背景色のまま少し見えることで「カードが浮いている」感じになる。
+        backdrop = ctk.CTkFrame(root, fg_color=COLOR_BG, corner_radius=0)
+        backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        overlay = ctk.CTkFrame(backdrop, fg_color=COLOR_PANEL, corner_radius=16,
+                                border_width=1, border_color=COLOR_BORDER)
+        overlay.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.88, relheight=0.88)
+
+        def close_overlay():
+            backdrop.destroy()
+
+        header = ctk.CTkFrame(overlay, fg_color="transparent")
+        header.pack(fill="x", padx=28, pady=(26, 4))
+        ctk.CTkLabel(header, text="✓ UPDATED", font=("Segoe UI", 10, "bold"),
+                     text_color=COLOR_ACCENT, anchor="w").pack(fill="x")
+        ctk.CTkLabel(header, text=f"What's New in {version}", font=("Segoe UI", 20, "bold"),
+                     text_color=COLOR_TEXT_MAIN, anchor="w", justify="left").pack(fill="x", pady=(4, 0))
+
+        body = ctk.CTkScrollableFrame(overlay, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=28, pady=(10, 6))
+
+        for raw in (notes or "").strip().splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("## "):
+                ctk.CTkLabel(body, text=line[3:], font=("Segoe UI", 13, "bold"),
+                             text_color=COLOR_ACCENT, anchor="w").pack(fill="x", pady=(12, 4))
+            elif line.startswith("- "):
+                row = ctk.CTkFrame(body, fg_color="transparent")
+                row.pack(fill="x", pady=2)
+                ctk.CTkLabel(row, text="•", font=FONT_BODY, text_color=COLOR_TEXT_SUB,
+                             width=16, anchor="w").pack(side="left")
+                ctk.CTkLabel(row, text=line[2:], font=FONT_BODY, text_color=COLOR_TEXT_SUB,
+                             anchor="w", justify="left", wraplength=410).pack(side="left", fill="x", expand=True)
+            else:
+                ctk.CTkLabel(body, text=line, font=FONT_BODY, text_color=COLOR_TEXT_SUB,
+                             anchor="w", justify="left", wraplength=440).pack(fill="x", pady=2)
+
+        # 文字が収まりきる時は右のスクロールバーを隠す(はみ出た時だけ出す)。
+        def update_scrollbar_visibility():
+            try:
+                body.update_idletasks()
+                canvas = body._parent_canvas
+                bbox = canvas.bbox("all")
+                content_h = bbox[3] - bbox[1] if bbox else 0
+                if content_h <= canvas.winfo_height():
+                    body._scrollbar.grid_remove()
+                else:
+                    body._scrollbar.grid()
+            except Exception:
+                pass
+        root.after(50, update_scrollbar_visibility)
+
+        footer = ctk.CTkFrame(overlay, fg_color="transparent")
+        footer.pack(fill="x", padx=28, pady=(6, 26))
+        release_url = f"https://github.com/{GITHUB_REPO}/releases"
+        ctk.CTkButton(
+            footer, text="View on GitHub", command=lambda: webbrowser.open(release_url),
+            fg_color="transparent", hover_color=COLOR_INPUT, text_color=COLOR_TEXT_SUB,
+            border_width=0, font=FONT_LABEL, width=110, height=36,
+        ).pack(side="left")
+        ctk.CTkButton(
+            footer, text="Got it", command=close_overlay,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_BG,
+            corner_radius=8, font=FONT_LABEL, width=120, height=36,
+        ).pack(side="right")
+
+        backdrop.lift()
+
+    # 自動更新(またはUPDATEタブでの更新)の直後に一度だけ、何が変わったかを
+    # 見せる。設定画面と同じウィンドウの中に直接表示する。
+    pending_notice = _read_pending_update_notice()
+    if pending_notice:
+        version, notes = pending_notice
+        root.after(300, lambda: show_whats_new_overlay(version, notes))
 
     def make_hotkey_recorder(parent, initial_value):
         """ホットキー入力欄(クリックしてから新しいキーを押すと変更できる)を
@@ -1218,7 +1455,7 @@ def open_setting_window():
     ctk.CTkLabel(update_panel, textvariable=update_status_var, font=FONT_BODY, text_color=COLOR_TEXT_SUB,
                  anchor="w", wraplength=460, justify="left").pack(fill="x", padx=20, pady=(0, 10))
 
-    _update_state = {"installer_url": None, "release_url": None}
+    _update_state = {"installer_url": None, "release_url": None, "latest_tag": "", "notes": ""}
 
     # インストール自体は(ONでもOFFでも)常にウィザードなしのサイレント
     # インストールで行う。ONは何もしなくても自動でこれが走り、OFFは
@@ -1239,6 +1476,7 @@ def open_setting_window():
                 installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
                 with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
                     f.write(resp.read())
+                _write_update_notice(_update_state["latest_tag"], _update_state["notes"])
                 os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
                 msg = "Installing update in the background — AudioSwitcher will restart automatically."
                 root.after(0, lambda: update_status_var.set(msg))
@@ -1288,9 +1526,11 @@ def open_setting_window():
         try:
             info = _update_info_queue.get_nowait()
             if info:
-                latest_tag, release_url, installer_url = info
+                latest_tag, release_url, installer_url, notes = info
                 _update_state["installer_url"] = installer_url
                 _update_state["release_url"] = release_url
+                _update_state["latest_tag"] = latest_tag
+                _update_state["notes"] = notes
                 update_title_var.set("UPDATE AVAILABLE")
                 update_detail_var.set(f"{latest_tag} is available (current: v{__version__})")
                 install_btn.configure(state="normal", text="Download & Install")
