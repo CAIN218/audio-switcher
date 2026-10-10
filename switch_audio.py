@@ -38,7 +38,7 @@ ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 if not os.path.exists(ICON_PATH) and hasattr(sys, "_MEIPASS"):
     ICON_PATH = os.path.join(sys._MEIPASS, "app_icon.ico")
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -120,6 +120,31 @@ def draw_headphones(canvas, cx, cy, size, color, width=None):
         items.append(_rounded_rect(canvas, cx + x0 * s, oy + 6 * s, cx + (x0 + 40) * s, oy + 76 * s,
                                    14 * s, fill=color, outline=""))
     return items
+
+
+def draw_speaker(canvas, cx, cy, size, color):
+    """サイトのアイコンに描かれているスピーカーの図(本体+音の波2本)。
+    元の図形は幅約148・高さ約132なので、sizeに合わせて縮小して描く。"""
+    s = size / 148.0
+    pts = [(-70, -26), (-40, -26), (0, -62), (0, 62), (-40, 26), (-70, 26)]
+    items = [canvas.create_polygon([v for x, y in pts for v in (cx + x * s, cy + y * s)],
+                                   fill=color, outline=color, width=max(1, 8 * s), joinstyle="round")]
+    lw = max(1.5, 14 * s)
+    for ox, r, ang in ((-3.4, 42, 45.6), (-4.3, 78, 45.9)):
+        x0 = cx + ox * s
+        items.append(canvas.create_arc(x0 - r * s, cy - r * s, x0 + r * s, cy + r * s,
+                                       start=-ang, extent=ang * 2, style="arc", outline=color, width=lw))
+    return items
+
+
+_HEADPHONE_WORDS = ("headphone", "headset", "earphone", "earbud", "buds", "airpods", "ヘッドホン",
+                    "ヘッドフォン", "ヘッドセット", "イヤホン")
+
+
+def looks_like_headphones(device_name):
+    """デバイス名からヘッドホン系かどうかを推測する(通知のアイコンの出し分け用)"""
+    name = (device_name or "").lower()
+    return any(word in name for word in _HEADPHONE_WORDS)
 
 
 def ensure_com_initialized():
@@ -376,7 +401,7 @@ def _rounded_rect(cv, x1, y1, x2, y2, r, **kwargs):
 # 完全には解放されない）。常駐中は1枚のToplevelを使い回し、フェード管理だけ
 # やり直すことでインタプリタの再生成を避ける。
 class _ToastManager:
-    WIDTH, HEIGHT = 320, 68
+    WIDTH, HEIGHT = 340, 76
     WHATSNEW_WIDTH, WHATSNEW_HEIGHT = 360, 260
 
     def __init__(self, root):
@@ -433,9 +458,15 @@ class _ToastManager:
             left, top = 0, 0
             right = self.window.winfo_screenwidth()
             bottom = self.window.winfo_screenheight()
-        x = right - self.WIDTH - 6
-        y = bottom - self.HEIGHT - 6
-        self.window.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y}")
+        x = right - self.WIDTH - 10
+        y = bottom - self.HEIGHT - 10
+        self._base_xy = (x, y)
+        self._apply_position()
+
+    def _apply_position(self):
+        x, y = getattr(self, "_base_xy", (0, 0))
+        offset = int(round(getattr(self, "_slide", 0)))
+        self.window.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y + offset}")
 
     def show(self, device_name):
         self._ensure_window()
@@ -448,21 +479,27 @@ class _ToastManager:
 
         canvas = self.canvas
         canvas.delete("all")
-        self._draw_toast_frame(canvas, "Output switched")
+        self._draw_toast_frame(canvas, "出力先を切り替えました",
+                               "headphones" if looks_like_headphones(device_name) else "speaker")
 
         # 長いデバイス名は「...」で切らず、収まりきらない分だけ左右に
         # ゆっくり往復させて全体を読めるようにする(Canvasは自身の外側を
         # 自動的に描画しないので、はみ出した部分は特別なクリップ処理
         # なしでそのまま隠れる)。
-        left_x = self.TEXT_X
-        right_bound = self.WIDTH - 14
-        text_item = canvas.create_text(left_x, 44, anchor="w", text=device_name,
-                                        fill=COLOR_TEXT_MAIN, font=self.DEVICE_FONT)
+        # 文字は専用の小さなCanvasに描く。メインのCanvasに直接描くと、長い名前を
+        # スクロールさせた時に左のアイコンの上や枠の外まで文字がはみ出すため。
+        text_w = self.WIDTH - 18 - self.TEXT_X
+        text_canvas = tk.Canvas(canvas, width=text_w, height=26, bg=COLOR_PANEL, highlightthickness=0)
+        text_canvas.bind("<Button-1>", lambda e: self.on_click() if self.on_click else None)
+        canvas.create_window(self.TEXT_X, self.MAIN_Y, anchor="w", window=text_canvas)
+        text_item = text_canvas.create_text(0, 13, anchor="w", text=device_name,
+                                            fill=COLOR_TEXT_MAIN, font=self.DEVICE_FONT)
         text_width = self._device_font.measure(device_name)
-        if text_width > (right_bound - left_x):
-            self._start_marquee(text_item, text_width, left_x, right_bound)
+        if text_width > text_w:
+            self._start_marquee(text_item, text_width, 0, text_w, text_canvas, 13)
 
         canvas.configure(cursor="")
+        self._progress_item = None
 
         self.on_click = None
         self._update_subtitle_id = None
@@ -473,23 +510,31 @@ class _ToastManager:
         self.current_alpha = 0.0
         self._fade_in()
 
-    TEXT_X = 60
+    TEXT_X = 74
+    SUB_Y = 27
+    MAIN_Y = 47
 
-    def _draw_toast_frame(self, canvas, header_text):
-        """トースト共通の土台: 角丸パネル + 左にアプリアイコンと同じヘッドホン
-        (どのアプリからの通知かがひと目で分かるように) + 小さな見出し"""
-        _rounded_rect(canvas, 1, 1, self.WIDTH - 1, self.HEIGHT - 1, 16,
+    def _draw_toast_frame(self, canvas, header_text, glyph="headphones"):
+        """トースト共通の土台: 角丸パネル + 左にカッパーの丸いアイコン
+        (切り替え先がヘッドホンならヘッドホン、それ以外はスピーカー)+ 小さな見出し。
+        以前の「左端の線+英字の見出し」はただの帯に見えて味気なかったため、
+        何に切り替わったかがアイコンでひと目で分かる形にした。"""
+        _rounded_rect(canvas, 1, 1, self.WIDTH - 1, self.HEIGHT - 1, 20,
                       fill=COLOR_PANEL, outline=COLOR_BORDER, width=1)
-        _rounded_rect(canvas, 12, 12, 48, self.HEIGHT - 12 - (self.HEIGHT - 68), 10,
-                      fill=COLOR_INPUT, outline="")
-        draw_headphones(canvas, 30, 34, 22, COLOR_ACCENT)
-        canvas.create_text(self.TEXT_X, 23, anchor="w", text=header_text,
-                           fill=COLOR_ACCENT, font=F(9, "bold"))
+        cy = self.HEIGHT / 2
+        canvas.create_oval(16, cy - 22, 60, cy + 22, fill=COLOR_ACCENT, outline="")
+        if glyph == "speaker":
+            draw_speaker(canvas, 38, cy, 24, COLOR_BG)
+        else:
+            draw_headphones(canvas, 38, cy, 24, COLOR_BG)
+        canvas.create_text(self.TEXT_X, self.SUB_Y, anchor="w", text=header_text,
+                           fill=COLOR_TEXT_SUB, font=F(9))
 
-    def _start_marquee(self, item, text_width, left_x, right_bound):
+    def _start_marquee(self, item, text_width, left_x, right_bound, canvas=None, text_y=None):
         """収まりきらないデバイス名を、はみ出した分だけ左へスクロールして
         端で少し止まり、また右へ戻って止まる、を繰り返す。"""
-        canvas = self.canvas
+        canvas = canvas or self.canvas
+        text_y = self.MAIN_Y if text_y is None else text_y
         scroll_distance = text_width - (right_bound - left_x)
         min_x = left_x - scroll_distance
         state = {"x": left_x, "dir": -1, "pause": 18}  # 表示直後に少し静止してから動き出す
@@ -510,7 +555,7 @@ class _ToastManager:
                 state["x"] = left_x
                 state["dir"] = -1
                 state["pause"] = 18
-            canvas.coords(item, state["x"], 44)
+            canvas.coords(item, state["x"], text_y)
             self.marquee_job = self.root.after(40, tick)
 
         self.marquee_job = self.root.after(40, tick)
@@ -530,7 +575,8 @@ class _ToastManager:
 
         canvas = self.canvas
         canvas.delete("all")
-        self._draw_toast_frame(canvas, "Update available")
+        self._progress_item = None
+        self._draw_toast_frame(canvas, "アップデートがあります")
         auto = self.auto_update_enabled and installer_url
         if auto:
             subtitle = f"{latest_tag} — installing automatically..."
@@ -538,7 +584,7 @@ class _ToastManager:
             subtitle = f"{latest_tag} — click to install"
         else:
             subtitle = f"{latest_tag} — click to view"
-        self._update_subtitle_id = canvas.create_text(self.TEXT_X, 44, anchor="w", text=subtitle,
+        self._update_subtitle_id = canvas.create_text(self.TEXT_X, self.MAIN_Y, anchor="w", text=subtitle,
                                                         fill=COLOR_TEXT_MAIN, font=F(10, "bold"))
 
         self._pending_release_url = release_url
@@ -599,16 +645,42 @@ class _ToastManager:
         self.fade_job = self.root.after(self._hold_ms, self._fade_out)
 
     def _fade_in(self):
-        if self.current_alpha < 0.96:
-            self.current_alpha += 0.12
-            self.window.attributes("-alpha", min(self.current_alpha, 0.96))
+        # フェードしながら下から少しせり上がる(_slideは表示開始時に14px)
+        if self.current_alpha == 0.0:
+            self._slide = 14
+        if self.current_alpha < 0.98:
+            self.current_alpha += 0.1
+            self._slide = max(0.0, self._slide * 0.72)
+            self.window.attributes("-alpha", min(self.current_alpha, 0.98))
+            self._apply_position()
             self.fade_job = self.root.after(15, self._fade_in)
         else:
-            self.fade_job = self.root.after(self._hold_ms, self._fade_out)
+            self._slide = 0
+            self._apply_position()
+            if getattr(self, "_progress_item", None):
+                self._hold_started = time.time()
+                self._hold_tick()
+            else:
+                self.fade_job = self.root.after(self._hold_ms, self._fade_out)
+
+    def _hold_tick(self):
+        """表示中、残り時間のラインを右から縮めていき、なくなったら消す"""
+        elapsed = (time.time() - self._hold_started) * 1000
+        ratio = max(0.0, 1.0 - elapsed / self._hold_ms)
+        try:
+            x1, y, x2, _ = self.canvas.coords(self._progress_item)
+            full = self.WIDTH - 14 - self.TEXT_X
+            self.canvas.coords(self._progress_item, x1, y, x1 + full * ratio, y)
+        except Exception:
+            pass
+        if ratio <= 0:
+            self._fade_out()
+        else:
+            self.fade_job = self.root.after(30, self._hold_tick)
 
     def _fade_out(self):
         if self.current_alpha > 0.0:
-            self.current_alpha -= 0.06
+            self.current_alpha -= 0.08
             self.window.attributes("-alpha", max(self.current_alpha, 0.0))
             self.fade_job = self.root.after(15, self._fade_out)
         else:
@@ -1972,13 +2044,13 @@ def open_setting_window():
     # 導入したことで固定の見積もり値だと下端(ボトムバー)が切れることが
     # あったため、全タブの中身を組み終えたこのタイミングで測り直す。
     # CTkTabviewの高さは「今開いているタブ」の中身でしか決まらないので、
-    # 全タブを一度ずつ開いて一番高いものに合わせる(どのタブでも下の
-    # Saveボタンが切れないように)。
-    required_height = 0
-    for tab_name in ("Multi-Device", "Settings", "A/B Switch"):
-        tabview.set(tab_name)
-        root.update_idletasks()
-        required_height = max(required_height, root.winfo_reqheight() + 12)
+    # 一番高いタブに合わせて足りない分を足す(どのタブでも下のSaveボタンが
+    # 切れないように)。tabview.set()で全タブを順に開いて測る方法は、
+    # set()が100ms後に「他のタブを隠す」処理を予約するため、最後に開いた
+    # はずのA/B Switchタブまで隠れて、起動直後に中身が空になってしまった。
+    root.update_idletasks()
+    tab_heights = [tab.winfo_reqheight() for tab in (tab_general, tab_multi, tab_settings)]
+    required_height = root.winfo_reqheight() + max(tab_heights) - tab_general.winfo_reqheight() + 12
     root.geometry(f"560x{required_height}")
 
     # ---- 機能紹介ウォークスルー。初回起動時に自動で出るほか、ヘッダーの
@@ -2402,19 +2474,21 @@ def open_setting_window():
             """実際の画面と同じく、デスクトップの右下(タスクバーの上)に
             下からスッと出てくるトースト通知。show(name, on_done)/hide()"""
             x1, y1, x2, y2 = DESK
-            TOAST_W, TOAST_H = 196, 52
+            TOAST_W, TOAST_H = 206, 52
             tx = x2 - TOAST_W - 10
             final_ty = y2 - taskbar_h - TOAST_H - 8
             slide_offset = 16
-            panel = _rounded_rect(canvas, tx, final_ty, tx + TOAST_W, final_ty + TOAST_H, 10,
+            cy = final_ty + TOAST_H / 2
+            panel = _rounded_rect(canvas, tx, final_ty, tx + TOAST_W, final_ty + TOAST_H, 14,
                                   fill=COLOR_PANEL, outline=COLOR_BORDER, width=1)
-            accent_bar = canvas.create_rectangle(tx, final_ty + 8, tx + 3, final_ty + TOAST_H - 8,
-                                                 fill=COLOR_ACCENT, outline="")
-            header = canvas.create_text(tx + 14, final_ty + 16, anchor="w", text="Output switched",
-                                        fill=COLOR_ACCENT, font=F(7, "bold"))
-            device_text = canvas.create_text(tx + 14, final_ty + 34, anchor="w", text="",
-                                             fill=COLOR_TEXT_MAIN, font=F(10, "bold"))
-            items = (panel, accent_bar, header, device_text)
+            circle = canvas.create_oval(tx + 10, cy - 15, tx + 40, cy + 15, fill=COLOR_ACCENT, outline="")
+            hp_glyph = draw_headphones(canvas, tx + 25, cy, 17, COLOR_BG)
+            sp_glyph = draw_speaker(canvas, tx + 25, cy, 17, COLOR_BG)
+            header = canvas.create_text(tx + 50, final_ty + 18, anchor="w", text="出力先を切り替えました",
+                                        fill=COLOR_TEXT_SUB, font=F(7))
+            device_text = canvas.create_text(tx + 50, final_ty + 34, anchor="w", text="",
+                                             fill=COLOR_TEXT_MAIN, font=F(9, "bold"))
+            items = tuple([panel, circle, header, device_text] + hp_glyph + sp_glyph)
             for item in items:
                 canvas.itemconfig(item, state="hidden")
 
@@ -2428,6 +2502,8 @@ def open_setting_window():
                     canvas.itemconfig(item, state="normal")
                     canvas.move(item, 0, slide_offset)
                     canvas.tag_raise(item)
+                for item in (sp_glyph if looks_like_headphones(name) else hp_glyph):
+                    canvas.itemconfig(item, state="hidden")
                 prev = {"v": slide_offset}
 
                 def on_tick(e):
