@@ -17,11 +17,14 @@ Grab the latest `AudioSwitcher.exe` from [Releases](../../releases). No installa
 
 Double-click `AudioSwitcher.exe` to open the settings window.
 
-1. Pick the two playback devices you want to switch between under **DEVICE LAYER A** / **DEVICE LAYER B**
-2. Click the **GLOBAL TRIGGER HOTKEY** field and press the key combo you want to use (default: `ctrl+alt+a`)
-3. Use "Test switch now" to verify it works
-4. Turn on **Start on boot** if you want it to launch automatically with Windows
-5. **Save & Run** saves your settings and immediately starts running in the background (**Save only** just saves without launching)
+1. On the **A/B Switch** tab, pick the two playback devices you want to switch between under **Device A** / **Device B**
+2. Click the **Hotkey** field and press the key combo you want to use (default: `ctrl+alt+a`)
+3. Use the test switch button next to the current output to verify it works
+4. (Optional) On the **Multi-Device** tab, turn on the device-select overlay to pick from 3+ devices with a second hotkey (default: `ctrl+alt+s`), and tick only the devices you want to appear in that list
+5. On the **Settings** tab, turn on **Start on boot** if you want it to launch automatically with Windows, and **Auto-update** if you want to stay on the latest version
+6. **Save & Run** saves your settings and immediately starts running in the background (**Save only** just saves without launching)
+
+Press the **?** button in the top-right corner (or "使い方をもう一度見る" on the Settings tab) any time to replay the step-by-step tutorial.
 
 ### 2. Normal use
 

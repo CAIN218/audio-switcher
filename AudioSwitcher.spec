@@ -10,7 +10,8 @@ a = Analysis(
     ['switch_audio.py'],
     pathex=[],
     binaries=binaries_comtypes + binaries_pycaw + binaries_ctk,
-    datas=datas_comtypes + datas_pycaw + datas_ctk,
+    # app_icon.icoは設定画面のタイトルバー用にexe内にも同梱する
+    datas=datas_comtypes + datas_pycaw + datas_ctk + [('app_icon.ico', '.')],
     hiddenimports=[
         'pycaw',
         'pycaw.pycaw',

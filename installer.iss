@@ -7,7 +7,7 @@
 ; (dist\AudioSwitcher.exe must already exist -- run PyInstaller first.)
 
 #define MyAppName "AudioSwitcher"
-#define MyAppVersion "1.6.0"
+#define MyAppVersion "1.7.0"
 #define MyAppPublisher "Yuga Tanaka"
 #define MyAppURL "https://github.com/CAIN218/audio-switcher"
 #define MyAppExeName "AudioSwitcher.exe"
