@@ -1,15 +1,26 @@
 # AudioSwitcher
 
+**Switch your Windows audio output with one hotkey** — no more digging through Sound settings when you swap between speakers, a headset, or a DAC.
+
+![AudioSwitcher switching devices with a hotkey](assets/audioswitcher-hotkey.gif)
+
 A resident audio output switcher for Windows.
 Instantly toggle between two pre-registered playback devices (e.g. speakers and headphones) with a single global hotkey.
 
 - Shows a toast notification with the current output device on every switch
+- Pick from 3+ devices with a second hotkey (Multi-Device tab)
+- Tells apart devices that share the same name (uses Windows Core Audio IDs)
 - Supports auto-start on Windows boot
+- English / Japanese UI (English by default)
 - No external exe required (talks to the Windows Core Audio API directly)
+
+More info and screenshots: [Yuga's Lab](https://cain218.github.io/Yuga-lab/audioswitcher.html)
 
 ## Download
 
 Grab the latest `AudioSwitcher.exe` from [Releases](../../releases). No installation needed — just run the exe.
+
+> **Note:** `AudioSwitcher.exe` is not code-signed, so Windows SmartScreen may show a warning the first time you run it. The full source is in this repository if you want to review it (or build it yourself, see below) first.
 
 ## Usage
 
