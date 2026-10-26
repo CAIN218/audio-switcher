@@ -40,7 +40,7 @@ ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 if not os.path.exists(ICON_PATH) and hasattr(sys, "_MEIPASS"):
     ICON_PATH = os.path.join(sys._MEIPASS, "app_icon.ico")
 
-__version__ = "1.7.3"
+__version__ = "1.8.0"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
