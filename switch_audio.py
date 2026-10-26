@@ -13,6 +13,8 @@ import ctypes
 import json
 import tempfile
 import urllib.request
+import urllib.parse
+import hashlib
 import webbrowser
 import winshell
 from win32com.client import Dispatch
@@ -1115,6 +1117,55 @@ _update_queue = queue.Queue()
 _install_status_queue = queue.Queue()
 
 
+_CHECKSUM_ASSET = "SHA256SUMS"
+
+
+def _is_github_release_url(url):
+    """更新ファイルは必ずGitHubのリリースアセットから取る。それ以外のホスト・
+    http:は(APIの応答が改ざんされていても)ダウンロードしない。"""
+    try:
+        p = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+    return p.scheme == "https" and p.hostname == "github.com" and p.path.lower().startswith(f"/{GITHUB_REPO.lower()}/releases/download/")
+
+
+def _has_checksum_asset(assets):
+    return any(a.get("name", "") == _CHECKSUM_ASSET for a in assets or [])
+
+
+def _download_verified(url, dest_path, timeout):
+    """urlをdest_pathに保存する。同じリリースのSHA256SUMSに載っているハッシュと
+    一致しなければ保存したファイルを消して例外を投げる(実行も展開もしない)。"""
+    if not _is_github_release_url(url):
+        raise RuntimeError("untrusted update URL")
+    headers = {"User-Agent": "AudioSwitcher-update-check"}
+    sums_url = url.rsplit("/", 1)[0] + "/" + _CHECKSUM_ASSET
+    with urllib.request.urlopen(urllib.request.Request(sums_url, headers=headers), timeout=10) as resp:
+        sums = resp.read().decode("utf-8", "replace")
+    name = url.rsplit("/", 1)[1]
+    expected = None
+    for line in sums.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == name:
+            expected = parts[0].lower()
+            break
+    if not expected:
+        raise RuntimeError("no checksum for update file")
+    h = hashlib.sha256()
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as resp, \
+            open(dest_path, "wb") as f:
+        for chunk in iter(lambda: resp.read(65536), b""):
+            h.update(chunk)
+            f.write(chunk)
+    if h.hexdigest() != expected:
+        try:
+            os.remove(dest_path)
+        except OSError:
+            pass
+        raise RuntimeError("update checksum mismatch")
+
+
 def _fetch_latest_release_info():
     """GitHubの最新リリースを確認する。__version__より新しい場合だけ
     (latest_tag, release_url, installer_url, notes)を返し、そうでなければ
@@ -1132,11 +1183,16 @@ def _fetch_latest_release_info():
     release_url = data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
     notes = data.get("body") or ""
     installer_url = None
-    for asset in data.get("assets", []) or []:
-        name = asset.get("name", "")
-        if name.lower().startswith("audioswitcher-setup") and name.lower().endswith(".exe"):
-            installer_url = asset.get("browser_download_url")
-            break
+    # SHA256SUMSが無いリリースは自動インストールせず、リリースページを開く
+    # フォールバックに任せる(検証できないファイルは実行しない)。
+    if _has_checksum_asset(data.get("assets")):
+        for asset in data.get("assets", []) or []:
+            name = asset.get("name", "")
+            if name.lower().startswith("audioswitcher-setup") and name.lower().endswith(".exe"):
+                url = asset.get("browser_download_url")
+                if _is_github_release_url(url or ""):
+                    installer_url = url
+                break
     if latest_tag and _parse_version(latest_tag) > _parse_version(__version__):
         return (latest_tag, release_url, installer_url, notes)
     return None
@@ -1202,10 +1258,8 @@ def _download_and_launch_installer(installer_url, release_url, latest_tag="", no
     _install_status_queue経由でメインスレッドに伝え、失敗時はリリース
     ページを開くフォールバックに切り替えてもらう。"""
     try:
-        req = urllib.request.Request(installer_url, headers={"User-Agent": "AudioSwitcher-update-check"})
-        installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
-        with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
-            f.write(resp.read())
+        installer_path = os.path.join(tempfile.mkdtemp(prefix="audioswitcher-update-"), os.path.basename(installer_url))
+        _download_verified(installer_url, installer_path, 30)
         _write_update_notice(latest_tag, notes)
         os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
         _install_status_queue.put(("done", None))
@@ -1773,10 +1827,8 @@ def open_setting_window(prefill=None):
 
         def worker():
             try:
-                req = urllib.request.Request(installer_url, headers={"User-Agent": "AudioSwitcher-update-check"})
-                installer_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_url))
-                with urllib.request.urlopen(req, timeout=30) as resp, open(installer_path, "wb") as f:
-                    f.write(resp.read())
+                installer_path = os.path.join(tempfile.mkdtemp(prefix="audioswitcher-update-"), os.path.basename(installer_url))
+                _download_verified(installer_url, installer_path, 30)
                 _write_update_notice(_update_state["latest_tag"], _update_state["notes"])
                 os.startfile(installer_path, arguments="/VERYSILENT /SUPPRESSMSGBOX /NORESTART")
                 msg = L("Installing update in the background — AudioSwitcher will restart automatically.",
