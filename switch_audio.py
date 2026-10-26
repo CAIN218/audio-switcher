@@ -49,20 +49,69 @@ last_switch_time = 0
 _com_thread_local = threading.local()
 
 # ----------------------------------------------------------------------
-# デザイントークン — Yuga's lab のアプリアイコン(暗い背景・白い線・差し色1色)
-# に合わせた、黒鉛色×カッパー(銅)1色のシンプルな配色。設定画面とトースト通知の
-# 両方で共有する。
+# デザイントークン — 設定画面・トースト通知・一覧オーバーレイで共有する、
+# 青1色のシンプルな配色。ライト/ダークの2種類を持ち、設定の「表示テーマ」
+# (ライト / ダーク / デバイスに合わせる)で切り替える。
+# 各COLOR_*は apply_theme() が書き換えるモジュール変数。描く瞬間に参照
+# されるので、画面を作り直せば新しい配色になる。
 # ----------------------------------------------------------------------
-COLOR_BG          = "#18171c"  # アプリ全体の背景(アイコンの背景色と同じ)
-COLOR_PANEL       = "#201f25"  # カードパネル
-COLOR_INPUT       = "#2a282f"  # 入力欄・コンボボックス
-COLOR_BORDER      = "#36333c"  # 通常の境界線
-COLOR_ACCENT      = "#d08a52"  # カッパー(アイコンの差し色と同じ)
-COLOR_ACCENT_HOVER = "#e0a06c"
-COLOR_ACCENT_DIM  = "#5a4331"  # アクセントの控えめ版(非アクティブ表示用)
-COLOR_TEXT_MAIN   = "#ece8e1"  # アイコンの白線に合わせたオフホワイト
-COLOR_TEXT_SUB    = "#a29c90"
-COLOR_TEXT_FAINT  = "#68645c"
+THEME_PALETTES = {
+    "dark": {
+        "COLOR_BG": "#1c1c1f",          # アプリ全体の背景
+        "COLOR_PANEL": "#26262a",       # サイドバー・カード
+        "COLOR_INPUT": "#2f2f34",       # 入力欄・コンボボックス
+        "COLOR_BORDER": "#3d3d43",      # 境界線
+        "COLOR_ACCENT": "#6ea0ff",      # 差し色(青)
+        "COLOR_ACCENT_HOVER": "#8db3ff",
+        "COLOR_ACCENT_DIM": "#25324f",  # アクセントの控えめ版(選択行・ホバー)
+        "COLOR_ON_ACCENT": "#0b1220",   # アクセント色の上に載せる文字
+        "COLOR_TEXT_MAIN": "#ececef",
+        "COLOR_TEXT_SUB": "#9a9aa3",
+        "COLOR_TEXT_FAINT": "#6c6c75",
+    },
+    "light": {
+        "COLOR_BG": "#f7f7f8",
+        "COLOR_PANEL": "#ffffff",
+        "COLOR_INPUT": "#efeff2",
+        "COLOR_BORDER": "#dcdce1",
+        "COLOR_ACCENT": "#2563eb",
+        "COLOR_ACCENT_HOVER": "#1d4fd0",
+        "COLOR_ACCENT_DIM": "#dbe6fb",
+        "COLOR_ON_ACCENT": "#ffffff",
+        "COLOR_TEXT_MAIN": "#1d1d20",
+        "COLOR_TEXT_SUB": "#6a6a72",
+        "COLOR_TEXT_FAINT": "#9a9aa3",
+    },
+}
+THEME_CHOICES = ("light", "dark", "system")  # 保存する値。systemは「デバイスに合わせる」
+THEME = "system"
+EFFECTIVE_THEME = "dark"
+
+
+def _device_prefers_dark():
+    """Windowsの「アプリのモード」がダークかどうか。読めない時はダーク。"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return value == 0
+    except Exception:
+        return True
+
+
+def apply_theme(choice):
+    """表示テーマ(light/dark/system)を配色に反映する。"""
+    global THEME, EFFECTIVE_THEME
+    THEME = choice if choice in THEME_CHOICES else "system"
+    if THEME == "system":
+        EFFECTIVE_THEME = "dark" if _device_prefers_dark() else "light"
+    else:
+        EFFECTIVE_THEME = THEME
+    globals().update(THEME_PALETTES[EFFECTIVE_THEME])
+
+
+apply_theme("dark")
 
 # ----------------------------------------------------------------------
 # 表示言語 — 英語(既定)と日本語を切り替えられる。画面上の文言はすべて
@@ -330,12 +379,26 @@ def load_language():
     return "en"
 
 
+def load_theme():
+    """表示テーマ(設定ファイルの11行目、"light"/"dark"/"system")。無ければ
+    「デバイスに合わせる」。"""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            if len(lines) > 10 and lines[10].strip() in THEME_CHOICES:
+                return lines[10].strip()
+    except Exception as e:
+        log_error("load_theme", e)
+    return "system"
+
+
 def _write_config_file(dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled,
                        auto_update_enabled, overlay_excluded):
-    """10行目に表示言語(今のLANG)を書く以外は、従来と同じ9行の形式"""
+    """10行目に表示言語(今のLANG)、11行目に表示テーマ(今のTHEME)を書く以外は、従来と同じ9行の形式"""
     excluded_json = json.dumps(list(overlay_excluded), ensure_ascii=False)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        f.write(f"{dev_a}\n{dev_b}\n{key}\n{startup_val}\n{overlay_key}\n{overlay_enabled}\n{ab_enabled}\n{auto_update_enabled}\n{excluded_json}\n{LANG}")
+        f.write(f"{dev_a}\n{dev_b}\n{key}\n{startup_val}\n{overlay_key}\n{overlay_enabled}\n{ab_enabled}\n{auto_update_enabled}\n{excluded_json}\n{LANG}\n{THEME}")
 
 
 def save_language(lang):
@@ -349,6 +412,17 @@ def save_language(lang):
             _write_config_file(*load_config(), load_overlay_excluded())
         except Exception as e:
             log_error("save_language", e)
+
+
+def save_theme(choice):
+    """表示テーマだけを切り替えて保存する(設定画面の表示テーマ用)。言語と同じく、
+    初回起動時は設定ファイルをまだ作らない。"""
+    apply_theme(choice)
+    if os.path.exists(CONFIG_FILE):
+        try:
+            _write_config_file(*load_config(), load_overlay_excluded())
+        except Exception as e:
+            log_error("save_theme", e)
 
 
 def save_config(dev_a, dev_b, key, startup_val, overlay_key, overlay_enabled, ab_enabled, auto_update_enabled="0",
@@ -573,9 +647,9 @@ class _ToastManager:
         cy = self.HEIGHT / 2
         canvas.create_oval(16, cy - 22, 60, cy + 22, fill=COLOR_ACCENT, outline="")
         if glyph == "speaker":
-            draw_speaker(canvas, 38, cy, 24, COLOR_BG)
+            draw_speaker(canvas, 38, cy, 24, COLOR_ON_ACCENT)
         else:
-            draw_headphones(canvas, 38, cy, 24, COLOR_BG)
+            draw_headphones(canvas, 38, cy, 24, COLOR_ON_ACCENT)
         canvas.create_text(self.TEXT_X, self.SUB_Y, anchor="w", text=header_text,
                            fill=COLOR_TEXT_SUB, font=F(9))
 
@@ -1498,7 +1572,8 @@ def open_setting_window(prefill=None):
          saved_ab_enabled, saved_auto_update) = prefill["values"]
     devices_b_options = [L("Select device...", "デバイスを選択...")] + devices
 
-    ctk.set_appearance_mode("dark")
+    apply_theme(THEME)
+    ctk.set_appearance_mode(EFFECTIVE_THEME)
 
     root = ctk.CTk(fg_color=COLOR_BG)
     resolve_font_family(root)
@@ -1507,7 +1582,7 @@ def open_setting_window(prefill=None):
     # 用意しておく(StringVarはデフォルトのTkルートが無いと作れないため)。
     auto_update_var = tk.StringVar(value=saved_auto_update)
     root.title("AudioSwitcher")
-    root.geometry("560x600")
+    root.geometry("700x600")
     root.resizable(False, False)
     if os.path.exists(ICON_PATH):
         try:
@@ -1596,7 +1671,7 @@ def open_setting_window(prefill=None):
         ).pack(side="left")
         ctk.CTkButton(
             footer, text=L("Got it", "閉じる"), command=close_overlay,
-            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_BG,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_ON_ACCENT,
             corner_radius=8, font=FONT_LABEL, width=120, height=38,
         ).pack(side="right")
 
@@ -1696,40 +1771,68 @@ def open_setting_window(prefill=None):
 
         return key_box, (lambda: rec["value"]), set_enabled
 
-    # ヘッダー: アプリアイコンと同じヘッドホン + タイトル + ヘルプ(?)ボタン
-    header = ctk.CTkFrame(root, fg_color="transparent")
-    header.pack(fill="x", padx=28, pady=(22, 14))
-    title_row = ctk.CTkFrame(header, fg_color="transparent")
-    title_row.pack(fill="x")
-    logo = tk.Canvas(title_row, width=30, height=30, bg=COLOR_BG, highlightthickness=0)
-    logo.pack(side="left", padx=(0, 10))
-    draw_headphones(logo, 15, 15, 26, COLOR_ACCENT)
-    title_box = ctk.CTkFrame(title_row, fg_color="transparent")
-    title_box.pack(side="left", fill="x", expand=True)
-    ctk.CTkLabel(title_box, text="AudioSwitcher", font=FONT_DISPLAY,
-                 text_color=COLOR_TEXT_MAIN, anchor="w", height=24).pack(fill="x")
-    ctk.CTkLabel(title_box, text=L("Switch your audio output with a single shortcut.", "ショートカット1つで、音の出力先を切り替えます。"),
-                 font=FONT_SMALL, text_color=COLOR_TEXT_SUB, anchor="w", height=18).pack(fill="x")
-    help_button = ctk.CTkButton(
-        title_row, text="?", command=lambda: show_onboarding(),
-        width=30, height=30, corner_radius=15,
-        fg_color=COLOR_INPUT, hover_color=COLOR_ACCENT_DIM, text_color=COLOR_TEXT_MAIN,
-        border_width=0, font=F(12, "bold"),
-    )
-    help_button.pack(side="right")
+    # レイアウト: 左にメニュー(切り替え / 一覧 / 全般)、右にそのページ、下に
+    # 「閉じる」(保存して常駐)。変更は開いている間も自動で保存される。
+    shell = ctk.CTkFrame(root, fg_color="transparent", corner_radius=0)
+    shell.pack(fill="both", expand=True)
 
-    tabview = ctk.CTkTabview(
-        root, width=1, height=1, fg_color=COLOR_PANEL, border_width=0, corner_radius=14,
-        segmented_button_fg_color=COLOR_INPUT, segmented_button_selected_color=COLOR_BORDER,
-        segmented_button_selected_hover_color=COLOR_BORDER,
-        segmented_button_unselected_color=COLOR_INPUT, segmented_button_unselected_hover_color=COLOR_PANEL,
-        text_color=COLOR_TEXT_MAIN, text_color_disabled=COLOR_TEXT_FAINT,
-    )
-    tabview._segmented_button.configure(font=F(10, "bold"), height=30)
-    tabview.pack(fill="both", expand=True, padx=28, pady=(0, 14))
-    tab_general = tabview.add(L("A/B Switch", "A/B 切り替え"))
-    tab_multi = tabview.add(L("Multi-Device", "複数デバイス"))
-    tab_settings = tabview.add(L("Settings", "設定"))
+    sidebar = ctk.CTkFrame(shell, fg_color=COLOR_PANEL, corner_radius=0, width=176)
+    sidebar.pack(side="left", fill="y")
+    sidebar.pack_propagate(False)
+    ctk.CTkFrame(shell, fg_color=COLOR_BORDER, corner_radius=0, width=1).pack(side="left", fill="y")
+
+    brand = ctk.CTkFrame(sidebar, fg_color="transparent")
+    brand.pack(fill="x", padx=16, pady=(20, 14))
+    logo = tk.Canvas(brand, width=28, height=28, bg=COLOR_PANEL, highlightthickness=0)
+    logo.pack(side="left", padx=(0, 8))
+    draw_headphones(logo, 14, 14, 24, COLOR_ACCENT)
+    ctk.CTkLabel(brand, text="AudioSwitcher", font=F(12, "bold"), text_color=COLOR_TEXT_MAIN,
+                 anchor="w").pack(side="left")
+
+    main_area = ctk.CTkFrame(shell, fg_color="transparent", corner_radius=0)
+    main_area.pack(side="left", fill="both", expand=True)
+
+    # 下の帯(状態表示 + 閉じるボタン)。中身はウィジェットを作り終えてから入れる。
+    # 先にside="bottom"で確保しておかないと、ページが広がって押し出されてしまう。
+    bottom_bar = ctk.CTkFrame(main_area, fg_color="transparent", corner_radius=0)
+    bottom_bar.pack(side="bottom", fill="x")
+    ctk.CTkFrame(bottom_bar, fg_color=COLOR_BORDER, corner_radius=0, height=1).pack(fill="x")
+
+    page_title = ctk.CTkLabel(main_area, text="", font=F(16, "bold"), text_color=COLOR_TEXT_MAIN, anchor="w")
+    page_title.pack(fill="x", padx=28, pady=(22, 6))
+    pages_box = ctk.CTkFrame(main_area, fg_color="transparent", corner_radius=0)
+    pages_box.pack(fill="both", expand=True, padx=8)
+
+    page_names = [L("A/B Switch", "切り替え"), L("Device list", "デバイス一覧"), L("General", "全般")]
+    tab_general = ctk.CTkFrame(pages_box, fg_color="transparent", corner_radius=0)
+    tab_multi = ctk.CTkFrame(pages_box, fg_color="transparent", corner_radius=0)
+    tab_settings = ctk.CTkFrame(pages_box, fg_color="transparent", corner_radius=0)
+    page_frames = [tab_general, tab_multi, tab_settings]
+    nav_buttons = []
+
+    def show_page(index):
+        for frame in page_frames:
+            frame.pack_forget()
+        page_frames[index].pack(fill="both", expand=True)
+        page_title.configure(text=page_names[index])
+        for i, btn in enumerate(nav_buttons):
+            btn.configure(fg_color=(COLOR_ACCENT_DIM if i == index else "transparent"),
+                          text_color=(COLOR_TEXT_MAIN if i == index else COLOR_TEXT_SUB))
+
+    for i, name in enumerate(page_names):
+        btn = ctk.CTkButton(
+            sidebar, text=name, anchor="w", command=lambda i=i: show_page(i),
+            fg_color="transparent", hover_color=COLOR_INPUT, text_color=COLOR_TEXT_SUB,
+            corner_radius=8, font=F(11, "bold"), height=36,
+        )
+        btn.pack(fill="x", padx=10, pady=1)
+        nav_buttons.append(btn)
+
+    ctk.CTkButton(
+        sidebar, text=L("How to use", "使い方"), anchor="w", command=lambda: show_onboarding(),
+        fg_color="transparent", hover_color=COLOR_INPUT, text_color=COLOR_TEXT_SUB,
+        corner_radius=8, font=FONT_BODY, height=34,
+    ).pack(side="bottom", fill="x", padx=10, pady=(0, 14))
 
     def section_label(parent, text):
         lbl = ctk.CTkLabel(parent, text=text, font=FONT_LABEL, text_color=COLOR_TEXT_SUB,
@@ -1746,7 +1849,7 @@ def open_setting_window(prefill=None):
             parent, text=text, variable=variable, onvalue="1", offvalue="0", command=command,
             font=FONT_BODY, text_color=COLOR_TEXT_MAIN,
             fg_color=COLOR_BORDER, progress_color=COLOR_ACCENT,
-            button_color=COLOR_TEXT_MAIN, button_hover_color="#ffffff",
+            button_color="#ffffff", button_hover_color="#ffffff",
         )
 
     # ---- Settingsタブ: 起動・アップデート・バージョン情報 ----
@@ -1760,9 +1863,43 @@ def open_setting_window(prefill=None):
     switch_startup = make_switch(settings_box, L("Start on boot (runs in the background)", "Windows 起動時に自動で常駐する"), startup_var)
     switch_startup.pack(anchor="w", padx=20, pady=(0, 4))
 
-    # 表示言語。切り替えたら、入力途中の内容を引き継いだまま画面を作り直す
-    # (全部の文言を個別に書き換えるより確実で、見落としが出ない)。
+    # 表示言語・表示テーマ。切り替えたら、入力途中の内容を引き継いだまま画面を
+    # 作り直す(全部の文言や色を個別に書き換えるより確実で、見落としが出ない)。
     reopen = {"prefill": None}
+
+    def reopen_prefill():
+        return {
+            "values": (combo_a.get(), combo_b.get(), get_shortcut(), startup_var.get(),
+                       get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get(),
+                       auto_update_var.get()),
+            "excluded": get_overlay_excluded(),
+            "tab": "settings",
+        }
+
+    theme_row = ctk.CTkFrame(settings_box, fg_color="transparent")
+    theme_row.pack(fill="x", padx=20, pady=(6, 4))
+    ctk.CTkLabel(theme_row, text=L("Appearance", "表示テーマ"), font=FONT_BODY, text_color=COLOR_TEXT_MAIN,
+                 anchor="w").pack(side="left")
+    THEME_LABELS = {"light": L("Light", "ライト"), "dark": L("Dark", "ダーク"),
+                    "system": L("Match device", "デバイスに合わせる")}
+
+    def on_theme_change(label):
+        choice = next(k for k, v in THEME_LABELS.items() if v == label)
+        if choice == THEME:
+            return
+        reopen["prefill"] = reopen_prefill()
+        save_theme(choice)
+        root.destroy()
+
+    theme_switch = ctk.CTkSegmentedButton(
+        theme_row, values=list(THEME_LABELS.values()), command=on_theme_change,
+        font=FONT_LABEL, height=28,
+        fg_color=COLOR_INPUT, selected_color=COLOR_ACCENT_DIM, selected_hover_color=COLOR_ACCENT_DIM,
+        unselected_color=COLOR_INPUT, unselected_hover_color=COLOR_BORDER,
+        text_color=COLOR_TEXT_MAIN,
+    )
+    theme_switch.set(THEME_LABELS[THEME])
+    theme_switch.pack(side="right")
     lang_row = ctk.CTkFrame(settings_box, fg_color="transparent")
     lang_row.pack(fill="x", padx=20, pady=(6, 4))
     ctk.CTkLabel(lang_row, text="Language / 言語", font=FONT_BODY, text_color=COLOR_TEXT_MAIN,
@@ -1773,21 +1910,15 @@ def open_setting_window(prefill=None):
         lang = next(k for k, v in LANG_LABELS.items() if v == label)
         if lang == LANG:
             return
-        reopen["prefill"] = {
-            "values": (combo_a.get(), combo_b.get(), get_shortcut(), startup_var.get(),
-                       get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get(),
-                       auto_update_var.get()),
-            "excluded": get_overlay_excluded(),
-            "tab": "settings",
-        }
+        reopen["prefill"] = reopen_prefill()
         save_language(lang)
         root.destroy()
 
     lang_switch = ctk.CTkSegmentedButton(
         lang_row, values=list(LANG_LABELS.values()), command=on_language_change,
         font=FONT_LABEL, height=28,
-        fg_color=COLOR_INPUT, selected_color=COLOR_BORDER, selected_hover_color=COLOR_BORDER,
-        unselected_color=COLOR_INPUT, unselected_hover_color=COLOR_PANEL,
+        fg_color=COLOR_INPUT, selected_color=COLOR_ACCENT_DIM, selected_hover_color=COLOR_ACCENT_DIM,
+        unselected_color=COLOR_INPUT, unselected_hover_color=COLOR_BORDER,
         text_color=COLOR_TEXT_MAIN,
     )
     lang_switch.set(LANG_LABELS[LANG])
@@ -1856,7 +1987,7 @@ def open_setting_window(prefill=None):
 
     install_btn = ctk.CTkButton(
         update_actions, text=L("Up to date", "最新です"), state="disabled", command=start_install,
-        fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_BG,
+        fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_ON_ACCENT,
         text_color_disabled=COLOR_TEXT_SUB,
         corner_radius=8, font=FONT_LABEL, width=150, height=32,
     )
@@ -1935,7 +2066,7 @@ def open_setting_window(prefill=None):
     now_row = ctk.CTkFrame(now_text, fg_color="transparent")
     now_row.pack(fill="x")
     side_badge = ctk.CTkLabel(now_row, text="A", font=F(9, "bold"), width=22, height=22,
-                              corner_radius=11, fg_color=COLOR_ACCENT, text_color=COLOR_BG)
+                              corner_radius=11, fg_color=COLOR_ACCENT, text_color=COLOR_ON_ACCENT)
     status_label = ctk.CTkLabel(now_row, text="", font=F(12, "bold"), text_color=COLOR_TEXT_MAIN,
                                 anchor="w", height=24)
     status_label.pack(side="right", fill="x", expand=True)
@@ -2112,7 +2243,7 @@ def open_setting_window(prefill=None):
             command=lambda: refresh_device_count(), font=FONT_BODY, text_color=COLOR_TEXT_MAIN,
             text_color_disabled=COLOR_TEXT_FAINT,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, border_color=COLOR_TEXT_FAINT,
-            checkmark_color=COLOR_BG, checkbox_width=18, checkbox_height=18, corner_radius=5, border_width=2,
+            checkmark_color=COLOR_ON_ACCENT, checkbox_width=18, checkbox_height=18, corner_radius=5, border_width=2,
         )
         check.pack(side="left", pady=4)
         device_checks.append(check)
@@ -2142,62 +2273,65 @@ def open_setting_window(prefill=None):
     switch_overlay.configure(command=apply_overlay_enabled_style)
     apply_overlay_enabled_style()
 
-    # ボトム: 保存ボタンだけを右側に置く
-    bottom_bar = ctk.CTkFrame(root, fg_color="transparent")
-    bottom_bar.pack(fill="x", padx=28, pady=(0, 22))
+    # ボトム: 状態表示(自動保存) + 「閉じる」。閉じる = 保存して常駐を始める。
+    bar_inner = ctk.CTkFrame(bottom_bar, fg_color="transparent")
+    bar_inner.pack(fill="x", padx=28, pady=14)
+    default_status = L("Changes are saved automatically", "変更は自動で保存されます")
+    status_var = tk.StringVar(value=default_status)
+    ctk.CTkLabel(bar_inner, textvariable=status_var, font=FONT_SMALL, text_color=COLOR_TEXT_SUB,
+                 anchor="w").pack(side="left")
 
-    btn_frame = ctk.CTkFrame(bottom_bar, fg_color="transparent")
-    btn_frame.pack(side="right")
+    def is_routing_incomplete():
+        return ab_enabled_var.get() == "1" and combo_b.get() == L("Select device...", "デバイスを選択...")
 
-    def on_save_only():
-        if ab_enabled_var.get() == "1" and combo_b.get() == L("Select device...", "デバイスを選択..."):
+    def current_values():
+        return (combo_a.get(), combo_b.get(), get_shortcut(), startup_var.get(),
+                get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get(),
+                auto_update_var.get(), tuple(get_overlay_excluded()))
+
+    def on_close():
+        if is_routing_incomplete():
             tk.messagebox.showwarning(L("Routing Incomplete", "設定が未完了です"),
                                        L("Please select a valid target for Device B.", "デバイス B の出力先を選んでください。"))
+            show_page(0)
             return
-        save_config(combo_a.get(), combo_b.get(), get_shortcut(), startup_var.get(),
-                    get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get(),
-                    auto_update_var.get(), get_overlay_excluded())
-        root.destroy()
-        sys.exit(0)
-
-    btn_save_only = ctk.CTkButton(
-        btn_frame, text=L("Save only", "保存のみ"), command=on_save_only,
-        fg_color="transparent", hover_color=COLOR_INPUT, text_color=COLOR_TEXT_SUB,
-        border_width=1, border_color=COLOR_BORDER, corner_radius=8,
-        font=FONT_LABEL, width=110, height=38,
-    )
-    btn_save_only.pack(side="left", padx=(0, 10))
-
-    def on_save_and_run():
-        if ab_enabled_var.get() == "1" and combo_b.get() == L("Select device...", "デバイスを選択..."):
-            tk.messagebox.showwarning(L("Routing Incomplete", "設定が未完了です"),
-                                       L("Please select a valid target for Device B.", "デバイス B の出力先を選んでください。"))
-            return
-        save_config(combo_a.get(), combo_b.get(), get_shortcut(), startup_var.get(),
-                    get_overlay_shortcut(), overlay_enabled_var.get(), ab_enabled_var.get(),
-                    auto_update_var.get(), get_overlay_excluded())
+        values = current_values()
+        save_config(*values[:8], list(values[8]))
         root.destroy()
         start_backend()
 
-    btn_save_run = ctk.CTkButton(
-        btn_frame, text=L("Save & Run", "保存して実行"), command=on_save_and_run,
-        fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_BG,
-        corner_radius=8, font=FONT_LABEL, width=130, height=38,
-    )
-    btn_save_run.pack(side="right")
+    ctk.CTkButton(
+        bar_inner, text=L("Close", "閉じる"), command=on_close,
+        fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_ON_ACCENT,
+        corner_radius=8, font=FONT_LABEL, width=110, height=36,
+    ).pack(side="right")
 
-    # ウィンドウ高さは中身の実測サイズに合わせて自動調整する。CTkTabviewを
-    # 導入したことで固定の見積もり値だと下端(ボトムバー)が切れることが
-    # あったため、全タブの中身を組み終えたこのタイミングで測り直す。
-    # CTkTabviewの高さは「今開いているタブ」の中身でしか決まらないので、
-    # 一番高いタブに合わせて足りない分を足す(どのタブでも下のSaveボタンが
-    # 切れないように)。tabview.set()で全タブを順に開いて測る方法は、
-    # set()が100ms後に「他のタブを隠す」処理を予約するため、最後に開いた
-    # はずのA/B Switchタブまで隠れて、起動直後に中身が空になってしまった。
+    # 自動保存: 値が変わったら少し待って保存する(押し忘れで消えないように)。
+    # 変更の検出を各ウィジェットのコールバックでなく定期チェックにしているのは、
+    # ホットキー入力欄・スイッチ・コンボなど種類が多く、取りこぼしを避けるため。
+    autosave = {"last": current_values()}
+
+    def autosave_tick():
+        try:
+            values = current_values()
+            if values != autosave["last"] and not is_routing_incomplete():
+                autosave["last"] = values
+                save_config(*values[:8], list(values[8]))
+                status_var.set(L("Saved", "保存しました"))
+                root.after(1500, lambda: status_var.set(default_status))
+        except Exception as e:
+            log_error("autosave", e)
+        root.after(700, autosave_tick)
+
+    root.after(700, autosave_tick)
+
+    # ウィンドウ高さは中身の実測サイズに合わせて自動調整する(一番高いページに
+    # 合わせ、どのページでも下の「閉じる」が切れないようにする)。
+    show_page(0)
     root.update_idletasks()
-    tab_heights = [tab.winfo_reqheight() for tab in (tab_general, tab_multi, tab_settings)]
-    required_height = root.winfo_reqheight() + max(tab_heights) - tab_general.winfo_reqheight() + 12
-    root.geometry(f"560x{required_height}")
+    page_h = max(frame.winfo_reqheight() for frame in page_frames)
+    chrome_h = page_title.winfo_reqheight() + 28 + bottom_bar.winfo_reqheight() + 16
+    root.geometry(f"700x{max(560, page_h + chrome_h)}")
 
     # ---- 機能紹介ウォークスルー。初回起動時に自動で出るほか、ヘッダーの
     # ヘルプボタン(?)や Settingsタブからいつでも呼び出せる。実際のトースト/
@@ -2261,7 +2395,7 @@ def open_setting_window(prefill=None):
             _rounded_rect(canvas, 10, CAPTION_Y - 18, ILLO_W - 10, CAPTION_Y + 18, 10,
                           fill=COLOR_INPUT, outline="")
             badge = canvas.create_oval(22, CAPTION_Y - 11, 44, CAPTION_Y + 11, fill=COLOR_ACCENT, outline="")
-            badge_text = canvas.create_text(33, CAPTION_Y, text="1", fill=COLOR_BG, font=F(9, "bold"))
+            badge_text = canvas.create_text(33, CAPTION_Y, text="1", fill=COLOR_ON_ACCENT, font=F(9, "bold"))
             text = canvas.create_text(56, CAPTION_Y, anchor="w", text="", fill=COLOR_TEXT_MAIN,
                                       font=F(10, "bold"))
 
@@ -2390,7 +2524,7 @@ def open_setting_window(prefill=None):
                     canvas.move(rect, 0, 3)
                     canvas.move(text, 0, 3)
                     canvas.itemconfig(rect, fill=COLOR_ACCENT, outline=COLOR_ACCENT)
-                    canvas.itemconfig(text, fill=COLOR_BG)
+                    canvas.itemconfig(text, fill=COLOR_ON_ACCENT)
 
             def release():
                 for rect, text in caps:
@@ -2415,10 +2549,10 @@ def open_setting_window(prefill=None):
             tab_ab_coords = (tx0, 8, tx0 + tab_w, 8 + tab_h)
             tab_multi_coords = (tx0 + tab_w + tab_gap, 8, tx0 + tab_w * 2 + tab_gap, 8 + tab_h)
             tab_ab = _rounded_rect(canvas, *tab_ab_coords, 6, fill=COLOR_BORDER, outline="")
-            canvas.create_text(tx0 + tab_w / 2, 8 + tab_h / 2, text=L("A/B Switch", "A/B 切り替え"),
+            canvas.create_text(tx0 + tab_w / 2, 8 + tab_h / 2, text=L("A/B Switch", "切り替え"),
                                fill=COLOR_TEXT_MAIN, font=F(8, "bold"))
             tab_multi = _rounded_rect(canvas, *tab_multi_coords, 6, fill=COLOR_INPUT, outline="")
-            canvas.create_text(tx0 + tab_w + tab_gap + tab_w / 2, 8 + tab_h / 2, text=L("Multi-Device", "複数デバイス"),
+            canvas.create_text(tx0 + tab_w + tab_gap + tab_w / 2, 8 + tab_h / 2, text=L("Device list", "デバイス一覧"),
                                fill=COLOR_TEXT_MAIN, font=F(8, "bold"))
 
             _rounded_rect(canvas, 10, 38, W - 10, 252, 12, fill=COLOR_BG, outline="")
@@ -2454,7 +2588,7 @@ def open_setting_window(prefill=None):
 
             btn_coords = (W - 130, 214, W - 28, 242)
             btn = _rounded_rect(canvas, *btn_coords, 8, fill=COLOR_ACCENT, outline="")
-            canvas.create_text(W - 79, 228, text=L("Save & Run", "保存して実行"), fill=COLOR_BG, font=F(9, "bold"))
+            canvas.create_text(W - 79, 228, text=L("Close", "閉じる"), fill=COLOR_ON_ACCENT, font=F(9, "bold"))
 
             set_cursor, move_cursor, click, hide_cursor = make_cursor(canvas)
 
@@ -2564,10 +2698,10 @@ def open_setting_window(prefill=None):
                 (L("Pick your first output for Device A", "デバイス A に1台目の出力先を選ぶ"), box_a_coords, act_device_a),
                 (L("Pick your second output for Device B", "デバイス B に2台目の出力先を選ぶ"), box_b_coords, act_device_b),
                 (L("Click Hotkey and press the keys you want", "ホットキーをクリックして、使いたいキーを押す"), box_key_coords, act_hotkey),
-                (L("Using 3+ devices? Go to the Multi-Device tab", "3台以上使うなら「複数デバイス」タブへ"), tab_multi_coords, act_tab_multi),
+                (L("Using 3+ devices? Go to Device list", "3台以上使うなら「デバイス一覧」へ"), tab_multi_coords, act_tab_multi),
                 (L("Turn the switch on", "スイッチを ON にする"), toggle_coords, act_toggle),
                 (L("Set the list hotkey the same way", "一覧を開くホットキーも同じように登録"), box_okey_coords, act_overlay_hotkey),
-                (L("Finally, Save & Run to start in the background", "最後に「保存して実行」で保存して常駐"), btn_coords, act_save),
+                (L("Finally, Close to start in the background", "最後に「閉じる」で保存して常駐"), btn_coords, act_save),
             ]
 
             def run(i):
@@ -2628,8 +2762,8 @@ def open_setting_window(prefill=None):
             panel = _rounded_rect(canvas, tx, final_ty, tx + TOAST_W, final_ty + TOAST_H, 14,
                                   fill=COLOR_PANEL, outline=COLOR_BORDER, width=1)
             circle = canvas.create_oval(tx + 10, cy - 15, tx + 40, cy + 15, fill=COLOR_ACCENT, outline="")
-            hp_glyph = draw_headphones(canvas, tx + 25, cy, 17, COLOR_BG)
-            sp_glyph = draw_speaker(canvas, tx + 25, cy, 17, COLOR_BG)
+            hp_glyph = draw_headphones(canvas, tx + 25, cy, 17, COLOR_ON_ACCENT)
+            sp_glyph = draw_speaker(canvas, tx + 25, cy, 17, COLOR_ON_ACCENT)
             header = canvas.create_text(tx + 50, final_ty + 18, anchor="w", text=L("Output switched", "出力先を切り替えました"),
                                         fill=COLOR_TEXT_SUB, font=F(7))
             device_text = canvas.create_text(tx + 50, final_ty + 34, anchor="w", text="",
@@ -2846,14 +2980,14 @@ def open_setting_window(prefill=None):
                         canvas.coords(check, *p1, *p2, p2[0] + (p3[0] - p2[0]) * t, p2[1] + (p3[1] - p2[1]) * t)
                 tween(canvas, 420, on_tick)
 
-            set_caption(1, L("Press Get Started, then Save & Run — done", "下の「はじめる」で設定画面に戻り、「保存して実行」で完了"))
+            set_caption(1, L("Press Get Started, then Close — done", "下の「はじめる」で設定画面に戻り、「閉じる」で完了"))
             tween(canvas, 600, fade_in, lambda: later(canvas, 150, draw_check))
 
         steps = [
             {
                 "title": L("How to set it up", "設定のしかた"),
-                "body": L("Just pick your devices and a hotkey, then press Save & Run.\nThe animation below walks through each step.",
-                           "デバイスとホットキーを選んで、「保存して実行」を押すだけです。\n下のアニメで、操作を1つずつ順番に見せます。"),
+                "body": L("Just pick your devices and a hotkey, then press Close.\nThe animation below walks through each step.",
+                           "デバイスとホットキーを選んで、「閉じる」を押すだけです。\n下のアニメで、操作を1つずつ順番に見せます。"),
                 "illustration": make_settings_illustration,
             },
             {
@@ -2863,9 +2997,9 @@ def open_setting_window(prefill=None):
                 "illustration": make_ab_illustration,
             },
             {
-                "title": L("Pick from 3+ devices (Multi-Device)", "3台以上から選ぶ（複数デバイス）"),
-                "body": L("Turn on Multi-Device to get a second hotkey that shows\nall your connected devices so you can pick one.",
-                           "「複数デバイス」を ON にすると、もう1つのホットキーで\nつながっているデバイスの一覧を出して、そこから選べます。"),
+                "title": L("Pick from 3+ devices (Device list)", "3台以上から選ぶ（デバイス一覧）"),
+                "body": L("Turn on Device list to get a second hotkey that shows\nall your connected devices so you can pick one.",
+                           "「デバイス一覧」を ON にすると、もう1つのホットキーで\nつながっているデバイスの一覧を出して、そこから選べます。"),
                 "illustration": make_overlay_illustration,
             },
             {
@@ -2989,7 +3123,7 @@ def open_setting_window(prefill=None):
             is_last = wiz["step"] == len(steps) - 1
             ctk.CTkButton(
                 right_frame, text=(L("Get Started", "はじめる") if is_last else L("Next", "次へ")), command=advance,
-                fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_BG,
+                fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_ON_ACCENT,
                 corner_radius=8, font=FONT_LABEL, width=120, height=38,
             ).pack(side="left")
 
@@ -3041,7 +3175,7 @@ def open_setting_window(prefill=None):
     if is_first_run:
         show_onboarding()
     if prefill and prefill.get("tab") == "settings":
-        tabview.set(L("Settings", "設定"))
+        show_page(2)
 
     root.mainloop()
 
@@ -3051,6 +3185,7 @@ def open_setting_window(prefill=None):
 if __name__ == "__main__":
     enable_dpi_awareness()
     LANG = load_language()
+    apply_theme(load_theme())
     try:
         if "/background" in sys.argv:
             if os.path.exists(CONFIG_FILE): start_backend()
