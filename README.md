@@ -14,7 +14,7 @@ Instantly toggle between two pre-registered playback devices (e.g. speakers and 
 - English / Japanese UI (English by default)
 - No external exe required (talks to the Windows Core Audio API directly)
 
-More info and screenshots: [Yuga's Lab](https://cain218.github.io/Yuga-lab/audioswitcher.html)
+More info and screenshots: [Gentlebit](https://cain218.github.io/Gentlebit/audioswitcher.html)
 
 ## Download
 
