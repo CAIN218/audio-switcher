@@ -37,7 +37,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPXで圧縮したexeはWindows Defenderなどが「圧縮済みの不審なexe」として
+    # 誤検知しやすいため無効にする(サイズは増えるがインストーラーで圧縮される)。
+    upx=False,
+    # 以下は旧設定(upx=True時代)の名残。upx=Falseなら実質無効
     # PyInstaller + UPX + Tkinterの組み合わせはtcl/tkのDLLが破損・不安定化する
     # 既知の問題があるため（実機でtcl86t.dll内での不定期クラッシュを確認済み）、
     # Tcl/Tk関連DLLとpythonランタイム本体はUPX圧縮の対象から除外する。
