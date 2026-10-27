@@ -2300,11 +2300,12 @@ def open_setting_window(prefill=None):
         root.destroy()
         start_backend()
 
-    ctk.CTkButton(
+    close_button = ctk.CTkButton(
         bar_inner, text=L("Close", "閉じる"), command=on_close,
         fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_ON_ACCENT,
         corner_radius=8, font=FONT_LABEL, width=110, height=36,
-    ).pack(side="right")
+    )
+    close_button.pack(side="right")
 
     # 自動保存: 値が変わったら少し待って保存する(押し忘れで消えないように)。
     # 変更の検出を各ウィジェットのコールバックでなく定期チェックにしているのは、
@@ -2343,573 +2344,205 @@ def open_setting_window(prefill=None):
     # 分かりづらかったため、各操作に「番号付きの字幕」「操作対象を囲む枠」
     # 「クリックの波紋」を付け、1つずつ間を取ってゆっくり見せるようにした。----
     def show_onboarding():
-        """使い方ガイド。新しい設定画面のミニチュアをキャンバスに描き、カーソルが
-        実際に押していく動きを見せる。触る場所だけを明るく残し(周りを暗くする)、
-        横に短い説明を出す。実際のトースト/オーバーレイをその場で呼ぶ方式は、
-        モニター判定の問題(別モニターに出て見えない等)に左右されるため使わず、
-        ミニチュアの中だけで完結させている(実機・ウィンドウ位置に依存しない)。"""
+        """使い方ガイド。本物の設定画面の上に、触る場所を囲む枠と短い説明を重ねて、
+        1か所ずつ案内する。ミニチュアを描く方式をやめたのは、描画が粗くなるのと、
+        実際の画面と見た目がずれるため。枠と説明カードは普通のウィジェットなので
+        文字も図形も画面の拡大率にそのまま合わせて鮮明に出る。"""
         if getattr(show_onboarding, "_open", None) is not None:
             try:
-                show_onboarding._open.lift()
-                show_onboarding._open.focus_force()
+                show_onboarding._open["lift"]()
                 return
             except Exception:
-                pass
-        from PIL import Image, ImageDraw, ImageTk
+                show_onboarding._open = None
 
-        SW, SH = 620, 400
-        dark = EFFECTIVE_THEME == "dark"
-        DESK = "#2a313b" if dark else "#cdd5df"
-        TASKBAR = "#20262e" if dark else "#b6bfcb"
-        DIM_ALPHA = 150 if dark else 130
-        wiz = {"step": 0, "token": 0, "window": None, "cursor": (310.0, 200.0),
-               "spot": None, "photo": None}
-
-        win = ctk.CTkToplevel(root)
-        win.title(L("How to use AudioSwitcher", "AudioSwitcher の使い方"))
-        win.resizable(False, False)
-        win.transient(root)
-        win.configure(fg_color=COLOR_BG)
         try:
-            win.attributes("-alpha", 0.0)
+            scale = float(root._get_widget_scaling())
         except Exception:
-            pass
-        wiz["window"] = win
-        show_onboarding._open = win
+            scale = 1.0
 
-        canvas = tk.Canvas(win, width=SW, height=SH, bg=DESK, highlightthickness=0)
-        canvas.pack()
+        def px(v):
+            return int(round(v * scale))
 
-        # ---------------- 小道具 ----------------
-        def tween(duration_ms, on_tick, on_done=None, token=None):
-            """0〜1のイーズアウトされた進捗を毎フレームon_tickに渡す駆動役"""
-            token = wiz["token"] if token is None else token
-            steps = max(1, duration_ms // 15)
-
-            def frame(i):
-                if token != wiz["token"] or not canvas.winfo_exists():
-                    return
-                t = i / steps
-                on_tick(1 - (1 - t) ** 3)
-                if i < steps:
-                    canvas.after(15, lambda: frame(i + 1))
-                elif on_done:
-                    on_done()
-            frame(0)
-
-        def rr(x1, y1, x2, y2, r, **kw):
-            return _rounded_rect(canvas, x1, y1, x2, y2, r, **kw)
-
-        def txt(x, y, text, size=9, weight="normal", color=None, anchor="w", tags=()):
-            return canvas.create_text(x, y, text=text, anchor=anchor, fill=color or COLOR_TEXT_MAIN,
-                                      font=F(size, weight), tags=tags)
-
-        # ---------------- ミニチュアを描く ----------------
-        canvas.create_rectangle(0, SH - 30, SW, SH, fill=TASKBAR, outline="")
-        draw_headphones(canvas, SW - 24, SH - 15, 14, "#ffffff" if dark else "#1d1d20")
-        WX1, WY1, WX2, WY2 = 50, 14, 570, 354
-        B = ("mw",)
-        rr(WX1, WY1, WX2, WY2, 10, fill=COLOR_BG, outline=COLOR_BORDER, tags=B)
-        rr(WX1, WY1, 190, WY2, 10, fill=COLOR_PANEL, outline="", tags=B)
-        canvas.create_rectangle(150, WY1, 180, WY2, fill=COLOR_PANEL, outline="", tags=B)
-        canvas.create_line(180, WY1 + 1, 180, WY2 - 1, fill=COLOR_BORDER, tags=B)
-        for item in draw_headphones(canvas, 66, 34, 14, COLOR_ACCENT):
-            canvas.addtag_withtag("mw", item)
-        txt(80, 34, "AudioSwitcher", 8, "bold", tags=B)
-
-        NAV = [(58, 56, 172, 82), (58, 84, 172, 110), (58, 112, 172, 138)]
-        nav_bg, nav_tx = [], []
-        for i, box in enumerate(NAV):
-            nav_bg.append(rr(*box, 7, fill=COLOR_PANEL, outline="", tags=B))
-            nav_tx.append(txt(box[0] + 10, (box[1] + box[3]) / 2, page_names[i], 8, "bold",
-                              COLOR_TEXT_SUB, tags=B))
-
-        # ページ0: 切り替え
-        P0 = ("mw", "p0")
-        txt(196, 38, page_names[0], 11, "bold", tags=P0)
-        FA, FB, HK = (196, 72, 554, 100), (196, 122, 554, 150), (196, 172, 554, 202)
-        txt(196, 62, L("Device A", "デバイス A"), 7, color=COLOR_TEXT_SUB, tags=P0)
-        txt(196, 112, L("Device B", "デバイス B"), 7, color=COLOR_TEXT_SUB, tags=P0)
-        txt(196, 162, L("Hotkey (switch A ⇄ B)", "ホットキー（A ⇄ B を切り替え）"), 7, color=COLOR_TEXT_SUB, tags=P0)
-        box_a = rr(*FA, 7, fill=COLOR_INPUT, outline="", tags=P0)
-        box_b = rr(*FB, 7, fill=COLOR_INPUT, outline="", tags=P0)
-        box_k = rr(*HK, 7, fill=COLOR_INPUT, outline="", tags=P0)
-        PH = L("Select device...", "選択してください")
-        val_a = txt(206, 86, PH, 8, tags=P0)
-        val_b = txt(206, 136, PH, 8, tags=P0)
-        txt(544, 86, "⌄", 9, color=COLOR_TEXT_SUB, anchor="e", tags=P0)
-        txt(544, 136, "⌄", 9, color=COLOR_TEXT_SUB, anchor="e", tags=P0)
-        val_k = txt(375, 187, L("Click, then press a key", "クリックして、キーを押す"), 8, "bold", anchor="center", tags=P0)
-
-        # ページ1: デバイス一覧
-        P1 = ("mw", "p1")
-        txt(196, 38, page_names[1], 11, "bold", tags=P1)
-        txt(196, 69, L("Enable device list", "デバイス一覧を使う"), 8, tags=P1)
-        TG = (512, 60, 544, 78)
-        tg_track = rr(*TG, 9, fill=COLOR_BORDER, outline="", tags=P1)
-        tg_knob = canvas.create_oval(514, 62, 528, 76, fill="#ffffff", outline="", tags=P1)
-        txt(196, 100, L("Hotkey (open the list)", "ホットキー（一覧を開く）"), 7, color=COLOR_TEXT_SUB, tags=P1)
-        rr(196, 110, 554, 140, 7, fill=COLOR_INPUT, outline="", tags=P1)
-        txt(375, 125, "ctrl+alt+s", 8, "bold", anchor="center", tags=P1)
-        txt(196, 160, L("A list of your devices appears in the middle of the screen.",
-                        "つながっているデバイスが、画面の中央に一覧で出ます。"), 7, color=COLOR_TEXT_SUB, tags=P1)
-
-        # ページ2: 全般
-        P2 = ("mw", "p2")
-        txt(196, 38, page_names[2], 11, "bold", tags=P2)
-        txt(196, 69, L("Start on boot", "Windows 起動時に自動で常駐する"), 8, tags=P2)
-        rr(512, 60, 544, 78, 9, fill=COLOR_ACCENT, outline="", tags=P2)
-        canvas.create_oval(530, 62, 544 - 2, 76, fill="#ffffff", outline="", tags=P2)
-
-        # 下の帯
-        canvas.create_line(181, 318, WX2 - 1, 318, fill=COLOR_BORDER, tags=B)
-        txt(196, 336, L("Changes are saved automatically", "変更は自動で保存されます"), 7, color=COLOR_TEXT_SUB, tags=B)
-        CB = (470, 324, 554, 348)
-        cb_bg = rr(*CB, 7, fill=COLOR_ACCENT, outline="", tags=B)
-        cb_tx = txt(512, 336, L("Close", "閉じる"), 8, "bold", COLOR_ON_ACCENT, anchor="center", tags=B)
-
-        # コンボのドロップダウン
-        DEVS = ["Speakers (Realtek Audio)", "Headphones (WH-1000XM5)", "Monitor Speakers (DELL)"]
-
-        def make_dropdown(top, name):
-            tag = ("dd", name)
-            rr(196, top, 554, top + 74, 8, fill=COLOR_PANEL, outline=COLOR_BORDER, tags=tag)
-            rows = []
-            for i, d in enumerate(DEVS):
-                y = top + 5 + i * 22
-                bg = rr(200, y, 550, y + 20, 5, fill=COLOR_PANEL, outline="", tags=tag)
-                t = txt(208, y + 10, d, 8, tags=tag)
-                rows.append((bg, (200, y, 550, y + 20)))
-            return rows
-        dd_a = make_dropdown(104, "dA")
-        dd_b = make_dropdown(154, "dB")
-
-        # ホットキーの表示(キーキャップ)
-        key_items = []
-
-        def make_keys(labels):
-            canvas.delete("keys")
-            x = 316 - (len(labels) * 50 - 6) / 2
-            key_items.clear()
-            for lab in labels:
-                bottom = rr(x, 322, x + 44, 344, 6, fill=COLOR_BORDER, outline="", tags=("keys",))
-                top = rr(x, 320, x + 44, 340, 6, fill=COLOR_PANEL, outline=COLOR_BORDER, tags=("keys",))
-                t = txt(x + 22, 330, lab, 8, "bold", anchor="center", tags=("keys",))
-                key_items.append((top, t))
-                x += 50
-            canvas.itemconfig("keys", state="normal")
-
-        # トースト
-        TX = 376
-        toast_tags = ("toast",)
-        rr(TX, 314, TX + 232, 364, 10, fill=COLOR_PANEL, outline=COLOR_BORDER, tags=toast_tags)
-        canvas.create_oval(TX + 12, 327, TX + 38, 353, fill=COLOR_ACCENT, outline="", tags=toast_tags)
-        t_side = txt(TX + 25, 340, "A", 9, "bold", COLOR_ON_ACCENT, anchor="center", tags=toast_tags)
-        txt(TX + 48, 328, L("Output switched", "出力を切り替えました"), 7, color=COLOR_TEXT_SUB, tags=toast_tags)
-        t_name = txt(TX + 48, 346, "Headphones", 10, "bold", tags=toast_tags)
-        canvas.move("toast", 260, 0)
-        toast_state = {"x": 260.0}
-
-        # デバイス一覧
-        OV = ("ovl",)
-        rr(170, 74, 450, 288, 12, fill=COLOR_PANEL, outline=COLOR_BORDER, tags=OV)
-        txt(184, 92, L("Choose an output device", "出力デバイスを選ぶ"), 7, color=COLOR_TEXT_SUB, tags=OV)
-        ov_rows = []
-        for i, d in enumerate(["Speakers (Realtek Audio)", "Headphones (WH-1000XM5)", "Monitor Speakers (DELL)", "HDMI (NVIDIA)"]):
-            y = 106 + i * 44
-            bg = rr(178, y, 442, y + 38, 8, fill=COLOR_PANEL, outline="", tags=OV)
-            txt(192, y + 19, str(i + 1), 8, color=COLOR_TEXT_SUB, tags=OV)
-            txt(214, y + 19, d, 9, tags=OV)
-            ov_rows.append((bg, (178, y, 442, y + 38)))
-
-        # 完了
-        DN = ("done",)
-        for item in draw_headphones(canvas, 310, 160, 120, COLOR_TEXT_MAIN):
-            canvas.addtag_withtag("done", item)
-        canvas.create_oval(290, 196, 330, 236, fill=COLOR_ACCENT, outline="", tags=DN)
-        done_check = canvas.create_line(300, 216, 300, 216, fill=COLOR_ON_ACCENT, width=4,
-                                        capstyle="round", joinstyle="round", tags=DN)
-
-        # カーソル
-        cursor_pts = [(3, 2), (18, 10), (11.5, 11.8), (8, 18)]
-        cursor = canvas.create_polygon(*[c for p in cursor_pts for c in p], fill="#ffffff", outline="#111111",
-                                       width=1.4, joinstyle="round", tags=("cursor",))
-
-        # ---------------- 状態の操作 ----------------
-        def show_page(i):
-            for k, tag in enumerate(("p0", "p1", "p2")):
-                canvas.itemconfig(tag, state=("normal" if k == i else "hidden"))
-                canvas.itemconfig(nav_bg[k], fill=(COLOR_ACCENT_DIM if k == i else COLOR_PANEL))
-                canvas.itemconfig(nav_tx[k], fill=(COLOR_TEXT_MAIN if k == i else COLOR_TEXT_SUB))
-
-        def set_window(visible):
-            canvas.itemconfig("mw", state=("normal" if visible else "hidden"))
-            if visible:
-                show_page(0)
-                canvas.itemconfig("dd", state="hidden")
-            else:
-                for tag in ("p0", "p1", "p2", "dd"):
-                    canvas.itemconfig(tag, state="hidden")
-
-        def reset():
-            canvas.itemconfig("done", state="hidden")
-            canvas.itemconfig("ovl", state="hidden")
-            canvas.itemconfig("keys", state="hidden")
-            canvas.coords(done_check, 300, 216, 300, 216)
-            canvas.itemconfig(val_a, text=PH)
-            canvas.itemconfig(val_b, text=PH)
-            canvas.itemconfig(val_k, text=L("Click, then press a key", "クリックして、キーを押す"), fill=COLOR_TEXT_MAIN)
-            for b_ in (box_a, box_b, box_k):
-                canvas.itemconfig(b_, outline="")
-            canvas.itemconfig(tg_track, fill=COLOR_BORDER)
-            canvas.coords(tg_knob, 514, 62, 528, 76)
-            canvas.itemconfig(cb_bg, fill=COLOR_ACCENT)
-            for bg, _ in dd_a + dd_b + ov_rows:
-                canvas.itemconfig(bg, fill=COLOR_PANEL)
-            canvas.move("toast", 260 - toast_state["x"], 0)
-            toast_state["x"] = 260.0
-            set_window(True)
-            canvas.itemconfig("cursor", state="hidden")
-            wiz["cursor"] = (310.0, 200.0)
-            set_spot(None)
-
-        # 暗くして、触る場所だけ明るく残す。PillowでRGBAの1枚を作って重ねる
-        def draw_spot(box, alpha):
-            img = Image.new("RGBA", (SW, SH), (0, 0, 0, int(alpha)))
-            if box:
-                x1, y1, x2, y2 = box
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                if x2 - x1 >= 24 and y2 - y1 >= 24:
-                    ImageDraw.Draw(img).rounded_rectangle((x1, y1, x2, y2), radius=10, fill=(0, 0, 0, 0))
-                elif x2 >= x1 and y2 >= y1:
-                    ImageDraw.Draw(img).rectangle((x1, y1, x2, y2), fill=(0, 0, 0, 0))
-            wiz["photo"] = ImageTk.PhotoImage(img)
-            canvas.delete("dim")
-            canvas.create_image(0, 0, anchor="nw", image=wiz["photo"], tags=("dim",))
-            canvas.delete("ring")
-            if box:
-                x1, y1, x2, y2 = box
-                _rounded_rect(canvas, x1, y1, x2, y2, 10, fill="", outline=COLOR_ACCENT, width=2, tags=("ring",))
-            canvas.tag_raise("cursor")
-
-        def set_spot(box):
-            """今の枠から新しい枠へ、滑らかに動かす(Noneなら明るさを戻す)"""
-            old = wiz["spot"]
-            wiz["spot"] = box
-            wiz["spot_id"] = wiz.get("spot_id", 0) + 1
-            my_id = wiz["spot_id"]
-            if box is None:
-                canvas.delete("dim")
-                canvas.delete("ring")
-                wiz["drawn"] = None
-                return
-            if old is None or wiz.get("drawn") is None:
-                cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-                start = (cx, cy, cx, cy)
-                fade_up = True
-            else:
-                start = wiz["drawn"]
-                fade_up = False
-
-            def on_tick(e):
-                if my_id != wiz["spot_id"]:
-                    return  # 新しい枠への移動が始まったら、古い動きはやめる
-                cur = tuple(start[i] + (box[i] - start[i]) * e for i in range(4))
-                wiz["drawn"] = cur
-                draw_spot(cur, DIM_ALPHA * (min(1.0, e * 1.5) if fade_up else 1.0))
-            tween(450, on_tick)
-
-        def pad(box, p=6):
-            return (box[0] - p, box[1] - p, box[2] + p, box[3] + p)
-
-        # ---------------- 台本の部品 ----------------
-        def S_wait(ms):
-            return lambda done: canvas.after(ms, done)
-
-        def S_do(fn):
-            def step(done):
-                fn()
-                done()
-            return step
-
-        def S_focus(box, text):
-            def step(done):
-                set_spot(pad(box))
-                set_caption(text)
-                done()
-            return step
-
-        def S_move(x, y, ms=800):
-            def step(done):
-                canvas.itemconfig("cursor", state="normal")
-                canvas.tag_raise("cursor")
-                sx, sy = wiz["cursor"]
-                tx, ty = x - 3, y - 2
-
-                def on_tick(e):
-                    nx, ny = sx + (tx - sx) * e, sy + (ty - sy) * e
-                    cx, cy = wiz["cursor"]
-                    canvas.move("cursor", nx - cx, ny - cy)
-                    wiz["cursor"] = (nx, ny)
-                tween(ms, on_tick, done)
-            return step
-
-        def S_click():
-            def step(done):
-                cx, cy = wiz["cursor"][0] + 3, wiz["cursor"][1] + 2
-                ring = canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, outline=COLOR_ACCENT, width=2)
-
-                def on_tick(e):
-                    r = 4 + 16 * e
-                    canvas.coords(ring, cx - r, cy - r, cx + r, cy + r)
-                    canvas.itemconfig(ring, outline=_blend(COLOR_ACCENT, DESK, e))
-                tween(420, on_tick, lambda: (canvas.delete(ring)))
-                canvas.after(200, done)
-            return step
-
-        def _blend(c1, c2, t):
-            r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
-            r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
-            return f"#{round(r1+(r2-r1)*t):02x}{round(g1+(g2-g1)*t):02x}{round(b1+(b2-b1)*t):02x}"
-
-        def center(box):
-            return ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
-
-        def S_toast(side, name):
-            def step(done):
-                canvas.itemconfig(t_side, text=side)
-                canvas.itemconfig(t_name, text=name)
-                canvas.itemconfig("keys", state="hidden")
-                start = toast_state["x"]
-
-                def on_tick(e):
-                    x = start + (0 - start) * e
-                    canvas.move("toast", x - toast_state["x"], 0)
-                    toast_state["x"] = x
-                tween(350, on_tick)
-                done()
-            return step
-
-        def S_toast_out():
-            def step(done):
-                start = toast_state["x"]
-
-                def on_tick(e):
-                    x = start + (260 - start) * e
-                    canvas.move("toast", x - toast_state["x"], 0)
-                    toast_state["x"] = x
-                tween(300, on_tick)
-                done()
-            return step
-
-        def S_keys(labels):
-            def step(done):
-                make_keys(labels)
-                canvas.tag_raise("keys")
-
-                def press():
-                    for top, t in key_items:
-                        canvas.move(top, 0, 2)
-                        canvas.move(t, 0, 2)
-                        canvas.itemconfig(top, fill=COLOR_ACCENT_DIM)
-                canvas.after(350, press)
-
-                def release():
-                    for top, t in key_items:
-                        canvas.move(top, 0, -2)
-                        canvas.move(t, 0, -2)
-                        canvas.itemconfig(top, fill=COLOR_PANEL)
-                canvas.after(550, release)
-                canvas.after(800, done)
-            return step
-
-        def S_check():
-            def step(done):
-                p1, p2, p3 = (300, 216), (308, 224), (321, 208)
-
-                def on_tick(e):
-                    if e < 0.4:
-                        t = e / 0.4
-                        canvas.coords(done_check, *p1, p1[0] + (p2[0] - p1[0]) * t, p1[1] + (p2[1] - p1[1]) * t)
-                    else:
-                        t = (e - 0.4) / 0.6
-                        canvas.coords(done_check, *p1, *p2, p2[0] + (p3[0] - p2[0]) * t, p2[1] + (p3[1] - p2[1]) * t)
-                tween(450, on_tick, done)
-            return step
-
-        def chain(steps):
-            token = wiz["token"]
-            it = iter(steps)
-
-            def nxt():
-                if token != wiz["token"] or not canvas.winfo_exists():
-                    return
-                try:
-                    step = next(it)
-                except StopIteration:
-                    return
-                step(nxt)
-            nxt()
-
-        def pick(box_item, dd_rows, idx, val_item, text, field_box):
-            # ドロップダウンを開き、項目を選んで閉じる
-            name = "dA" if dd_rows is dd_a else "dB"
-            row_bg, row_box = dd_rows[idx]
-            return [
-                S_move(*center(field_box)), S_click(),
-                S_do(lambda: (canvas.itemconfig(box_item, outline=COLOR_ACCENT), canvas.itemconfig(name, state="normal"),
-                              canvas.tag_raise(name), canvas.tag_raise("cursor"))),
-                S_focus((field_box[0], field_box[1], field_box[2], row_box[3] + 8 if False else dd_rows[-1][1][3] + 4), ""),
-                S_wait(450),
-                S_move(*center(row_box)), S_do(lambda: canvas.itemconfig(row_bg, fill=COLOR_ACCENT_DIM)), S_click(),
-                S_do(lambda: (canvas.itemconfig(val_item, text=text), canvas.itemconfig(name, state="hidden"),
-                              canvas.itemconfig(box_item, outline=""))),
-                S_wait(400),
-            ]
-
-        # ---------------- 4つの場面 ----------------
-        def scene_setup():
-            T = L
-            return (
-                [S_focus(FA, T("Choose Device A", "デバイス A を選ぶ"))]
-                + pick(box_a, dd_a, 0, val_a, DEVS[0], FA)
-                + [S_focus(FB, T("Choose Device B", "デバイス B を選ぶ"))]
-                + pick(box_b, dd_b, 1, val_b, DEVS[1], FB)
-                + [S_focus(HK, T("Set the hotkey", "ホットキーを決める")),
-                   S_move(*center(HK)), S_click(),
-                   S_do(lambda: (canvas.itemconfig(box_k, outline=COLOR_ACCENT),
-                                 canvas.itemconfig(val_k, text=L("Press a key combination...", "キーを押してください…"), fill=COLOR_ACCENT))),
-                   S_wait(900),
-                   S_do(lambda: (canvas.itemconfig(box_k, outline=""),
-                                 canvas.itemconfig(val_k, text="ctrl+alt+a", fill=COLOR_TEXT_MAIN))),
-                   S_wait(600),
-                   S_focus(NAV[1], T("Using 3+ devices? Open Device list", "3台以上使うなら「デバイス一覧」")),
-                   S_move(*center(NAV[1])), S_click(),
-                   S_do(lambda: show_page(1)), S_wait(500),
-                   S_move(*center(TG)), S_click(),
-                   S_do(lambda: (canvas.itemconfig(tg_track, fill=COLOR_ACCENT), canvas.coords(tg_knob, 530, 62, 544 - 2, 76))),
-                   S_wait(600),
-                   S_focus(CB, T("Finally, press Close", "最後に「閉じる」を押す")),
-                   S_move(*center(CB)), S_do(lambda: canvas.itemconfig(cb_bg, fill=COLOR_ACCENT_HOVER)), S_click(),
-                   S_wait(200),
-                   S_do(lambda: (set_window(False), canvas.itemconfig("cursor", state="hidden"))),
-                   S_focus((SW - 40, SH - 28, SW - 8, SH - 2), T("Saved, and running in the background", "保存されて、バックグラウンドで動きます")),
-                   S_wait(1800)]
-            )
-
-        def scene_ab():
-            return [S_do(lambda: set_window(False)),
-                    S_focus((230, 314, 390, 348), L("Press the hotkey (ctrl+alt+A)", "ホットキー（ctrl + alt + A）を押す")),
-                    S_wait(500), S_keys(["Ctrl", "Alt", "A"]), S_toast("A", "Speakers"),
-                    S_focus((TX, 314, TX + 232, 364), L("The device you switched to appears here", "右下に、切り替え先が出ます")),
-                    S_wait(1800), S_toast_out(), S_wait(500),
-                    S_keys(["Ctrl", "Alt", "A"]), S_toast("B", "Headphones"), S_wait(1800)]
-
-        def scene_list():
-            row = ov_rows[3]
-            return [S_do(lambda: set_window(False)),
-                    S_focus((230, 314, 390, 348), L("Press the hotkey (ctrl+alt+S)", "ホットキー（ctrl + alt + S）を押す")),
-                    S_wait(500), S_keys(["Ctrl", "Alt", "S"]),
-                    S_do(lambda: (canvas.itemconfig("ovl", state="normal"), canvas.tag_raise("ovl"))),
-                    S_focus((170, 74, 450, 288), L("Your connected devices appear in a list", "つながっているデバイスが一覧で出ます")),
-                    S_wait(1500),
-                    S_move(*center(row[1])), S_do(lambda: canvas.itemconfig(row[0], fill=COLOR_ACCENT_DIM)), S_click(),
-                    S_wait(300),
-                    S_do(lambda: (canvas.itemconfig("ovl", state="hidden"), canvas.itemconfig("cursor", state="hidden"))),
-                    S_toast("D", "HDMI (NVIDIA)"),
-                    S_focus((TX, 314, TX + 232, 364), L("It switches to the one you pick", "選んだデバイスに切り替わります")),
-                    S_wait(1800)]
-
-        def scene_done():
-            return [S_do(lambda: (set_window(False), canvas.itemconfig("done", state="normal"))),
-                    S_focus((250, 100, 370, 240), L("You're ready", "準備ができました")),
-                    S_check(), S_wait(2200)]
-
-        steps = [
-            {"title": L("How to set it up", "設定のしかた"),
-             "body": L("Pick your devices and a hotkey, then press Close.", "使うデバイスとホットキーを選んで、「閉じる」を押すだけです。"),
-             "scene": scene_setup},
-            {"title": L("Switch A and B with one key", "A と B をワンキーで切り替え"),
-             "body": L("Each press swaps Device A and B. The device you switched to appears at the bottom right.",
-                       "ホットキーを押すたびに A と B が入れ替わります。切り替え先は右下に出ます。"),
-             "scene": scene_ab},
-            {"title": L("Pick from 3+ devices", "3台以上から選ぶ（デバイス一覧）"),
-             "body": L("Turn on Device list to open a list with a second hotkey and pick one.",
-                       "「デバイス一覧」を ON にすると、別のホットキーで一覧が出て、そこから選べます。"),
-             "scene": scene_list},
-            {"title": L("You're all set", "準備完了"),
-             "body": L("Open this guide again from “How to use” in the left menu.",
-                       "この説明は、左メニューの「使い方」からいつでも見直せます。"),
-             "scene": scene_done},
-        ]
-
-        # ---------------- 説明の吹き出し(キャンバスの上に置く本物のウィジェット) ----------------
-        card = ctk.CTkFrame(canvas, fg_color=COLOR_PANEL, corner_radius=0, border_width=1,
-                            border_color=COLOR_BORDER, width=228, height=112)
+        wiz = {"step": 0, "token": 0, "ring_rect": None}
+        ring = [tk.Frame(root, bg=COLOR_ACCENT) for _ in range(4)]
+        CW, CH = 276, 132
+        card = tk.Frame(root, bg=COLOR_PANEL, highlightthickness=1, highlightbackground=COLOR_BORDER,
+                        width=px(CW), height=px(CH))
         card.pack_propagate(False)
         title_label = ctk.CTkLabel(card, text="", font=F(11, "bold"), text_color=COLOR_TEXT_MAIN, anchor="w")
-        title_label.pack(fill="x", padx=14, pady=(10, 0))
-        body_label = ctk.CTkLabel(card, text="", font=FONT_SMALL, text_color=COLOR_TEXT_SUB, anchor="nw",
-                                  justify="left", wraplength=200, height=34)
-        body_label.pack(fill="x", padx=14, pady=(0, 2))
-        nav_row = ctk.CTkFrame(card, fg_color="transparent")
-        nav_row.pack(fill="x", padx=12, pady=(0, 8), side="bottom")
-        dots = tk.Canvas(nav_row, width=64, height=10, bg=COLOR_PANEL, highlightthickness=0)
+        title_label.pack(fill="x", padx=14, pady=(12, 0))
+        body_label = ctk.CTkLabel(card, text="", font=FONT_BODY, text_color=COLOR_TEXT_SUB, anchor="nw",
+                                  justify="left", width=CW - 28, wraplength=px(CW - 28))
+        body_label.pack(fill="both", expand=True, padx=14, pady=(2, 0))
+        foot = tk.Frame(card, bg=COLOR_PANEL)
+        foot.pack(fill="x", padx=12, pady=(0, 10))
+        dots = tk.Canvas(foot, width=px(56), height=px(12), bg=COLOR_PANEL, highlightthickness=0)
         dots.pack(side="left")
-        btn_next = ctk.CTkButton(nav_row, text="", width=64, height=28, corner_radius=8, font=FONT_LABEL,
-                                 fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=COLOR_ON_ACCENT,
-                                 command=lambda: advance())
+        btn_next = ctk.CTkButton(foot, text="", width=64, height=28, corner_radius=8, font=FONT_LABEL,
+                                 fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+                                 text_color=COLOR_ON_ACCENT, command=lambda: advance())
         btn_next.pack(side="right")
-        btn_back = ctk.CTkButton(nav_row, text=L("Back", "戻る"), width=56, height=28, corner_radius=8, font=FONT_LABEL,
-                                 fg_color="transparent", hover_color=COLOR_INPUT, text_color=COLOR_TEXT_SUB,
-                                 command=lambda: go_back())
+        btn_back = ctk.CTkButton(foot, text=L("Back", "戻る"), width=56, height=28, corner_radius=8,
+                                 font=FONT_LABEL, fg_color="transparent", hover_color=COLOR_INPUT,
+                                 text_color=COLOR_TEXT_SUB, command=lambda: go_back())
         btn_back.pack(side="right", padx=(0, 4))
-        canvas.create_window(10, 282, anchor="nw", window=card, tags=("card",))
+        btn_skip = ctk.CTkButton(card, text=L("Skip", "スキップ"), width=56, height=22, corner_radius=6,
+                                 font=FONT_SMALL, fg_color="transparent", hover_color=COLOR_INPUT,
+                                 text_color=COLOR_TEXT_FAINT, command=lambda: close_wizard())
+        btn_skip.place(relx=1.0, x=-8, y=8, anchor="ne")
 
-        def set_caption(text):
-            if text:
-                body_label.configure(text=text)
+        toast = tk.Frame(root, bg=COLOR_PANEL, highlightthickness=2, highlightbackground=COLOR_ACCENT,
+                         width=px(250), height=px(64))
+        toast.pack_propagate(False)
+        ctk.CTkLabel(toast, text="B", width=30, height=30, corner_radius=15, fg_color=COLOR_ACCENT,
+                     text_color=COLOR_ON_ACCENT, font=F(11, "bold")).pack(side="left", padx=(12, 10))
+        tbox = tk.Frame(toast, bg=COLOR_PANEL)
+        tbox.pack(side="left")
+        ctk.CTkLabel(tbox, text=L("Output switched", "出力を切り替えました"), font=FONT_SMALL,
+                     text_color=COLOR_TEXT_SUB, anchor="w", height=16).pack(anchor="w")
+        ctk.CTkLabel(tbox, text="Headphones", font=F(12, "bold"), text_color=COLOR_TEXT_MAIN,
+                     anchor="w", height=22).pack(anchor="w")
+
+        def rect_of(*widgets, pad=6):
+            root.update_idletasks()
+            x1 = min(w.winfo_rootx() for w in widgets) - root.winfo_rootx() - pad
+            y1 = min(w.winfo_rooty() for w in widgets) - root.winfo_rooty() - pad
+            x2 = max(w.winfo_rootx() + w.winfo_width() for w in widgets) - root.winfo_rootx() + pad
+            y2 = max(w.winfo_rooty() + w.winfo_height() for w in widgets) - root.winfo_rooty() + pad
+            return (x1, y1, x2, y2)
+
+        def place_ring(r):
+            x1, y1, x2, y2 = [int(v) for v in r]
+            t = max(2, px(2))
+            ring[0].place(x=x1, y=y1, width=x2 - x1, height=t)
+            ring[1].place(x=x1, y=y2 - t, width=x2 - x1, height=t)
+            ring[2].place(x=x1, y=y1, width=t, height=y2 - y1)
+            ring[3].place(x=x2 - t, y=y1, width=t, height=y2 - y1)
+            for f in ring:
+                f.lift()
+            card.lift()
+
+        def hide_ring():
+            for f in ring:
+                f.place_forget()
+            wiz["ring_rect"] = None
+
+        def move_ring(target):
+            """前の枠から次の枠へ、短く滑らせて動かす"""
+            wiz["token"] += 1
+            token = wiz["token"]
+            start = wiz["ring_rect"]
+            wiz["ring_rect"] = target
+            if start is None:
+                place_ring(target)
+                return
+
+            def frame(i):
+                if token != wiz["token"]:
+                    return
+                t = i / 8
+                e = 1 - (1 - t) ** 3
+                place_ring([a + (b - a) * e for a, b in zip(start, target)])
+                if i < 8:
+                    root.after(15, lambda: frame(i + 1))
+            frame(1)
+
+        def place_card(target, prefer="below"):
+            rw, rh = root.winfo_width(), root.winfo_height()
+            cw, ch = px(CW), px(CH)
+            if target is None:
+                x, y = px(205), px(250)
+            else:
+                x1, y1, x2, y2 = target
+                x = max(px(190), min(x1, rw - cw - px(16)))
+                below, above = y2 + px(12), y1 - ch - px(12)
+                if prefer == "below" and below + ch <= rh - px(8):
+                    y = below
+                elif above >= px(50):
+                    y = above
+                else:
+                    y = max(px(50), min(below, rh - ch - px(8)))
+            card.place(x=x, y=y, width=cw, height=ch)
+            card.lift()
+
+        def show_toast():
+            rw, rh = root.winfo_width(), root.winfo_height()
+            tw = px(250)
+            fx, y = rw - tw - px(24), rh - px(64) - px(90)
+            token = wiz["token"]
+
+            def frame(i):
+                if token != wiz["token"]:
+                    return
+                e = 1 - (1 - i / 12) ** 3
+                toast.place(x=int(rw - (rw - fx) * e), y=y, width=tw, height=px(64))
+                toast.lift()
+                if i < 12:
+                    root.after(15, lambda: frame(i + 1))
+            frame(1)
+
+        steps = [
+            {"title": L("Choose two devices", "切り替える2台を選ぶ"),
+             "body": L("Pick Device A and Device B. The hotkey switches between them.",
+                       "デバイスAとBを選びます。ホットキーで、この2台を入れ替えます。"),
+             "page": 0, "target": lambda: rect_of(label_a, combo_b)},
+            {"title": L("Set a hotkey", "ホットキーを決める"),
+             "body": L("Click the box, then press the keys you want to use.",
+                       "枠をクリックして、使いたいキーを押します。"),
+             "page": 0, "target": lambda: rect_of(key_box)},
+            {"title": L("Switch with one key", "ワンキーで切り替え"),
+             "body": L("Each press swaps A and B. The device you switched to appears at the bottom right.",
+                       "押すたびにAとBが入れ替わり、切り替え先が右下に出ます。"),
+             "page": 0, "target": None, "toast": True},
+            {"title": L("Pick from 3+ devices", "3台以上から選ぶ"),
+             "body": L("Turn on Device list to open a list with a second hotkey and pick one.",
+                       "「デバイス一覧」をONにすると、別のホットキーで一覧が出て、そこから選べます。"),
+             "page": 1, "target": lambda: rect_of(switch_overlay, overlay_key_box)},
+            {"title": L("That's all", "準備完了"),
+             "body": L("Press Close to save and start. Open this guide again from “How to use”.",
+                       "「閉じる」を押すと保存されて、常駐が始まります。この説明は「使い方」からまた見られます。"),
+             "page": 1, "target": lambda: rect_of(close_button, pad=4), "prefer": "above"},
+        ]
 
         def draw_dots():
             dots.delete("all")
-            x = 2
-            for i in range(len(steps)):
-                w = 18 if i == wiz["step"] else 6
-                _rounded_rect(dots, x, 2, x + w, 8, 3, fill=(COLOR_ACCENT if i == wiz["step"] else COLOR_BORDER), outline="")
-                x += w + 4
+            n = len(steps)
+            for i in range(n):
+                on = i == wiz["step"]
+                cx = px(6 + i * 11)
+                r = px(3.5 if on else 2.5)
+                dots.create_oval(cx - r, px(6) - r, cx + r, px(6) + r,
+                                 fill=(COLOR_ACCENT if on else COLOR_BORDER), outline="")
 
         def close_wizard():
-            w = wiz["window"]
-            if w is None:
-                return
-            wiz["window"] = None
             wiz["token"] += 1
             show_onboarding._open = None
-
-            def fade(a):
+            for w in (*ring, card, toast):
                 try:
-                    if a <= 0:
-                        w.destroy()
-                        return
-                    w.attributes("-alpha", a)
-                    w.after(15, lambda: fade(a - 0.15))
+                    w.destroy()
                 except Exception:
-                    try:
-                        w.destroy()
-                    except Exception:
-                        pass
-            fade(0.85)
+                    pass
 
         def play():
             wiz["token"] += 1
-            reset()
             step = steps[wiz["step"]]
+            root.update_idletasks()
+            show_page(step["page"])
+            root.update_idletasks()
             title_label.configure(text=step["title"])
             body_label.configure(text=step["body"])
             btn_back.configure(state=("normal" if wiz["step"] else "disabled"))
             btn_next.configure(text=(L("Start", "はじめる") if wiz["step"] == len(steps) - 1 else L("Next", "次へ")))
             draw_dots()
-            canvas.after(350, lambda t=wiz["token"]: chain(step["scene"]()) if t == wiz["token"] else None)
+            toast.place_forget()
+            target = step["target"]() if step["target"] else None
+            if target is None:
+                hide_ring()
+            else:
+                move_ring(target)
+            place_card(target, step.get("prefer", "below"))
+            if step.get("toast"):
+                root.after(300, show_toast)
 
         def advance():
             if wiz["step"] >= len(steps) - 1:
@@ -2923,26 +2556,9 @@ def open_setting_window(prefill=None):
                 wiz["step"] -= 1
                 play()
 
-        win.protocol("WM_DELETE_WINDOW", close_wizard)
-        win.bind("<Escape>", lambda e: close_wizard())
-
-        win.update_idletasks()
-        root.update_idletasks()
-        rx, ry = root.winfo_x(), root.winfo_y()
-        rw, rh = root.winfo_width(), root.winfo_height()
-        win.geometry(f"{SW}x{SH}+{rx + (rw - SW) // 2}+{ry + (rh - SH) // 2}")
-
-        def fade_in(a=0.0):
-            try:
-                if wiz["window"] is not win:
-                    return
-                a = min(1.0, a + 0.1)
-                win.attributes("-alpha", a)
-                if a < 1.0:
-                    win.after(15, lambda: fade_in(a))
-            except Exception:
-                pass
-        win.after(30, fade_in)
+        root.bind("<Escape>", lambda e: close_wizard() if show_onboarding._open else None)
+        show_onboarding._open = {"lift": lambda: card.lift()}
+        root.update()
         play()
 
     if is_first_run:
