@@ -550,7 +550,7 @@ class _ToastManager:
 
     def __init__(self, root):
         self.root = root
-        self.DEVICE_FONT = F(11, "bold")
+        self.DEVICE_FONT = F(10, "bold")
         self.window = None
         self.canvas = None
         self.fade_job = None
@@ -560,7 +560,7 @@ class _ToastManager:
         self._hold_ms = 2600
         self._device_font = tkfont.Font(root=root, family=self.DEVICE_FONT[0],
                                          size=self.DEVICE_FONT[1], weight=self.DEVICE_FONT[2])
-        self._small_font = tkfont.Font(root=root, font=F(10))
+        self._small_font = tkfont.Font(root=root, font=F(9))
         self.theme_source = lambda: THEME  # 常駐側はload_themeに差し替える
         self._update_subtitle_id = None
         self._pending_release_url = None
@@ -614,6 +614,13 @@ class _ToastManager:
         offset = int(round(getattr(self, "_slide", 0)))
         self.window.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y + offset}")
 
+    SWITCH_SIZE = (290, 62)  # 切り替え通知は小さめ(アップデート通知などは WIDTH x HEIGHT)
+
+    def _set_size(self, width, height):
+        self.WIDTH, self.HEIGHT = width, height
+        if self.canvas is not None:
+            self.canvas.configure(width=width, height=height)
+
     def _refresh_theme(self):
         """表示のたびに配色を引き直す。設定で変えたテーマや、Windowsの
         アプリモードの切り替えが、再起動なしで次の通知から反映される。"""
@@ -636,6 +643,7 @@ class _ToastManager:
     def show(self, device_name, previous=None):
         self._refresh_theme()
         self._ensure_window()
+        self._set_size(*self.SWITCH_SIZE)
         if getattr(self, "_swap_job", None):
             self.root.after_cancel(self._swap_job)
             self._swap_job = None
@@ -650,22 +658,22 @@ class _ToastManager:
         canvas.delete("all")
         # 前のデバイスを薄く上に、切り替え先を太字で下に並べて、何から何へ
         # 変わったかが分かるようにする。前が分からない時は切り替え先だけ。
-        _rounded_rect(canvas, 1, 1, self.WIDTH - 1, self.HEIGHT - 1, 16,
+        _rounded_rect(canvas, 1, 1, self.WIDTH - 1, self.HEIGHT - 1, 14,
                       fill=COLOR_PANEL, outline=COLOR_BORDER, width=1)
-        dot_x, text_x = 24, 42
-        text_w = self.WIDTH - 18 - text_x
+        dot_x, text_x = 20, 36
+        text_w = self.WIDTH - 14 - text_x
         swap = bool(previous and previous != device_name)
         if swap:
             # 最初は「今までのデバイス」が下の段に目立って出ていて、少し置いてから
             # 上へ押し上げられて薄くなり、切り替え先が下から入ってくる(_animate_swap)。
-            prev_y, new_y = 27, 51
-            prev_dot = canvas.create_oval(dot_x - 5, new_y - 5, dot_x + 5, new_y + 5, fill=COLOR_ACCENT, outline="")
+            prev_y, new_y = 21, 42
+            prev_dot = canvas.create_oval(dot_x - 4, new_y - 4, dot_x + 4, new_y + 4, fill=COLOR_ACCENT, outline="")
             prev_text = canvas.create_text(text_x, new_y, anchor="w", text=self._fit_text(previous, text_w),
                                            fill=COLOR_TEXT_MAIN, font=self.DEVICE_FONT)
-            new_dot = canvas.create_oval(dot_x - 5, new_y - 5, dot_x + 5, new_y + 5, fill=COLOR_PANEL, outline="")
+            new_dot = canvas.create_oval(dot_x - 4, new_y - 4, dot_x + 4, new_y + 4, fill=COLOR_PANEL, outline="")
         else:
             new_y = self.HEIGHT / 2
-            canvas.create_oval(dot_x - 5, new_y - 5, dot_x + 5, new_y + 5, fill=COLOR_ACCENT, outline="")
+            canvas.create_oval(dot_x - 4, new_y - 4, dot_x + 4, new_y + 4, fill=COLOR_ACCENT, outline="")
 
         # 長いデバイス名は「...」で切らず、収まりきらない分だけ左右に
         # ゆっくり往復させて全体を読めるようにする(Canvasは自身の外側を
@@ -673,16 +681,16 @@ class _ToastManager:
         # なしでそのまま隠れる)。
         # 文字は専用の小さなCanvasに描く。メインのCanvasに直接描くと、長い名前を
         # スクロールさせた時に左のアイコンの上や枠の外まで文字がはみ出すため。
-        text_canvas = tk.Canvas(canvas, width=text_w, height=26, bg=COLOR_PANEL, highlightthickness=0)
+        text_canvas = tk.Canvas(canvas, width=text_w, height=22, bg=COLOR_PANEL, highlightthickness=0)
         text_canvas.bind("<Button-1>", lambda e: self.on_click() if self.on_click else None)
         win_id = canvas.create_window(text_x, new_y, anchor="w", window=text_canvas)
-        text_item = text_canvas.create_text(0, 13, anchor="w", text=device_name,
+        text_item = text_canvas.create_text(0, 11, anchor="w", text=device_name,
                                             fill=(COLOR_PANEL if swap else COLOR_TEXT_MAIN), font=self.DEVICE_FONT)
         text_width = self._device_font.measure(device_name)
 
         def start_marquee():
             if text_width > text_w:
-                self._start_marquee(text_item, text_width, 0, text_w, text_canvas, 13)
+                self._start_marquee(text_item, text_width, 0, text_w, text_canvas, 11)
 
         if swap:
             self._animate_swap(dict(canvas=canvas, text_canvas=text_canvas, win_id=win_id, text_item=text_item,
@@ -697,7 +705,7 @@ class _ToastManager:
 
         self.on_click = None
         self._update_subtitle_id = None
-        self._hold_ms = 3200 if swap else 2600
+        self._hold_ms = 2800 if swap else 2300
         self._place_bottom_right()
         self.window.deiconify()
         self._place_bottom_right()
@@ -711,7 +719,7 @@ class _ToastManager:
             self.root.after_cancel(self._swap_job)
             self._swap_job = None
         canvas, tc = w["canvas"], w["text_canvas"]
-        START_MS, DUR_MS, STEP_MS = 380, 440, 16
+        START_MS, DUR_MS, STEP_MS = 100, 240, 16
         steps = DUR_MS // STEP_MS
         small_set = {"v": False}
 
@@ -723,15 +731,15 @@ class _ToastManager:
                 t = min(1.0, i / steps)
                 e = 1 - (1 - t) ** 3
                 y_prev = w["new_y"] + (w["prev_y"] - w["new_y"]) * e
-                canvas.coords(w["prev_dot"], w["dot_x"] - 5, y_prev - 5, w["dot_x"] + 5, y_prev + 5)
+                canvas.coords(w["prev_dot"], w["dot_x"] - 4, y_prev - 4, w["dot_x"] + 4, y_prev + 4)
                 canvas.coords(w["prev_text"], w["text_x"], y_prev)
                 canvas.itemconfigure(w["prev_dot"], fill=_mix_color(COLOR_ACCENT, COLOR_TEXT_FAINT, e))
                 canvas.itemconfigure(w["prev_text"], fill=_mix_color(COLOR_TEXT_MAIN, COLOR_TEXT_FAINT, e))
                 if e >= 0.5 and not small_set["v"]:
                     small_set["v"] = True
-                    canvas.itemconfigure(w["prev_text"], font=F(10))
-                y_new = w["new_y"] + 16 * (1 - e)
-                canvas.coords(w["new_dot"], w["dot_x"] - 5, y_new - 5, w["dot_x"] + 5, y_new + 5)
+                    canvas.itemconfigure(w["prev_text"], font=F(9))
+                y_new = w["new_y"] + 12 * (1 - e)
+                canvas.coords(w["new_dot"], w["dot_x"] - 4, y_new - 4, w["dot_x"] + 4, y_new + 4)
                 canvas.itemconfigure(w["new_dot"], fill=_mix_color(COLOR_PANEL, COLOR_ACCENT, e))
                 canvas.coords(w["win_id"], w["text_x"], y_new)
                 tc.itemconfigure(w["text_item"], fill=_mix_color(COLOR_PANEL, COLOR_TEXT_MAIN, e))
@@ -801,6 +809,7 @@ class _ToastManager:
         出るものではないので、通常のトーストより長めに表示したままにする。"""
         self._refresh_theme()
         self._ensure_window()
+        self._set_size(type(self).WIDTH, type(self).HEIGHT)
         if self.fade_job:
             self.root.after_cancel(self.fade_job)
             self.fade_job = None
@@ -884,8 +893,8 @@ class _ToastManager:
         if self.current_alpha == 0.0:
             self._slide = 14
         if self.current_alpha < 0.98:
-            self.current_alpha += 0.1
-            self._slide = max(0.0, self._slide * 0.72)
+            self.current_alpha += 0.2
+            self._slide = max(0.0, self._slide * 0.55)
             self.window.attributes("-alpha", min(self.current_alpha, 0.98))
             self._apply_position()
             self.fade_job = self.root.after(15, self._fade_in)
