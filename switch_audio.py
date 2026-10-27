@@ -40,7 +40,7 @@ ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 if not os.path.exists(ICON_PATH) and hasattr(sys, "_MEIPASS"):
     ICON_PATH = os.path.join(sys._MEIPASS, "app_icon.ico")
 
-__version__ = "1.8.1"
+__version__ = "1.8.2"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -539,6 +539,8 @@ class _ToastManager:
         self._hold_ms = 2600
         self._device_font = tkfont.Font(root=root, family=self.DEVICE_FONT[0],
                                          size=self.DEVICE_FONT[1], weight=self.DEVICE_FONT[2])
+        self._small_font = tkfont.Font(root=root, font=F(10))
+        self.theme_source = lambda: THEME  # 常駐側はload_themeに差し替える
         self._update_subtitle_id = None
         self._pending_release_url = None
         self.auto_update_enabled = True
@@ -591,7 +593,24 @@ class _ToastManager:
         offset = int(round(getattr(self, "_slide", 0)))
         self.window.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y + offset}")
 
-    def show(self, device_name):
+    def _refresh_theme(self):
+        """表示のたびに配色を引き直す。設定で変えたテーマや、Windowsの
+        アプリモードの切り替えが、再起動なしで次の通知から反映される。"""
+        try:
+            apply_theme(self.theme_source())
+        except Exception as e:
+            log_error("toast_refresh_theme", e)
+
+    def _fit_text(self, text, width):
+        """幅に収まらない文字を「…」で切る(前のデバイス名用)"""
+        if self._small_font.measure(text) <= width:
+            return text
+        while text and self._small_font.measure(text + "…") > width:
+            text = text[:-1]
+        return text + "…"
+
+    def show(self, device_name, previous=None):
+        self._refresh_theme()
         self._ensure_window()
         if self.fade_job:
             self.root.after_cancel(self.fade_job)
@@ -602,8 +621,20 @@ class _ToastManager:
 
         canvas = self.canvas
         canvas.delete("all")
-        self._draw_toast_frame(canvas, L("Output switched", "出力先を切り替えました"),
-                               "headphones" if looks_like_headphones(device_name) else "speaker")
+        # 前のデバイスを薄く上に、切り替え先を太字で下に並べて、何から何へ
+        # 変わったかが分かるようにする。前が分からない時は切り替え先だけ。
+        _rounded_rect(canvas, 1, 1, self.WIDTH - 1, self.HEIGHT - 1, 16,
+                      fill=COLOR_PANEL, outline=COLOR_BORDER, width=1)
+        dot_x, text_x = 24, 42
+        text_w = self.WIDTH - 18 - text_x
+        if previous and previous != device_name:
+            prev_y, new_y = 27, 51
+            canvas.create_oval(dot_x - 4, prev_y - 4, dot_x + 4, prev_y + 4, fill=COLOR_TEXT_FAINT, outline="")
+            canvas.create_text(text_x, prev_y, anchor="w", text=self._fit_text(previous, text_w),
+                               fill=COLOR_TEXT_FAINT, font=F(10))
+        else:
+            new_y = self.HEIGHT / 2
+        canvas.create_oval(dot_x - 5, new_y - 5, dot_x + 5, new_y + 5, fill=COLOR_ACCENT, outline="")
 
         # 長いデバイス名は「...」で切らず、収まりきらない分だけ左右に
         # ゆっくり往復させて全体を読めるようにする(Canvasは自身の外側を
@@ -611,10 +642,9 @@ class _ToastManager:
         # なしでそのまま隠れる)。
         # 文字は専用の小さなCanvasに描く。メインのCanvasに直接描くと、長い名前を
         # スクロールさせた時に左のアイコンの上や枠の外まで文字がはみ出すため。
-        text_w = self.WIDTH - 18 - self.TEXT_X
         text_canvas = tk.Canvas(canvas, width=text_w, height=26, bg=COLOR_PANEL, highlightthickness=0)
         text_canvas.bind("<Button-1>", lambda e: self.on_click() if self.on_click else None)
-        canvas.create_window(self.TEXT_X, self.MAIN_Y, anchor="w", window=text_canvas)
+        canvas.create_window(text_x, new_y, anchor="w", window=text_canvas)
         text_item = text_canvas.create_text(0, 13, anchor="w", text=device_name,
                                             fill=COLOR_TEXT_MAIN, font=self.DEVICE_FONT)
         text_width = self._device_font.measure(device_name)
@@ -688,6 +718,7 @@ class _ToastManager:
         クリックでインストーラーを直接ダウンロード・自動起動する。なければ
         (ポータブル版のみのリリース等)従来通りリリースページを開く。頻繁に
         出るものではないので、通常のトーストより長めに表示したままにする。"""
+        self._refresh_theme()
         self._ensure_window()
         if self.fade_job:
             self.root.after_cancel(self.fade_job)
@@ -853,6 +884,7 @@ class _ToastManager:
         する形にした。内容を読む時間が必要なので自動では消さず、クリックで
         閉じる。以前は高さが固定で、項目が多いと文字が下にはみ出して
         「Got it」と重なっていたため、中身に合わせて高さを決めるようにした。"""
+        self._refresh_theme()
         self._ensure_whatsnew_window()
         if self.whatsnew_fade_job:
             self.root.after_cancel(self.whatsnew_fade_job)
@@ -1387,7 +1419,7 @@ def _switch_worker():
                 except Exception as e:
                     log_error("SetDefaultDevice", e)
                     continue
-                _toast_queue.put(target_display_name)
+                _toast_queue.put((target_display_name, current_default))
         except Exception as e:
             log_error("switch_worker", e)
 
@@ -1401,9 +1433,13 @@ def _direct_switch_worker():
     while True:
         target_id, target_display_name = _direct_switch_queue.get()
         try:
+            try:
+                previous = get_device_info()[1]
+            except Exception:
+                previous = None
             ensure_com_initialized()
             set_default_device_all_roles(target_id)
-            _toast_queue.put(target_display_name)
+            _toast_queue.put((target_display_name, previous))
         except Exception as e:
             log_error("direct_switch_worker", e)
 
@@ -1483,6 +1519,7 @@ def start_backend():
     root.report_callback_exception = lambda exc_type, exc_value, tb: log_error("tk_callback", exc_value)
     toast_manager = _ToastManager(root)
     toast_manager.auto_update_enabled = (auto_update_enabled == "1")
+    toast_manager.theme_source = load_theme
     device_overlay = _DeviceOverlay(root)
 
     def _on_overlay_select(name, target_id):
@@ -1497,8 +1534,9 @@ def start_backend():
     def poll_toast_queue():
         try:
             while True:
-                device_name = _toast_queue.get_nowait()
-                toast_manager.show(device_name)
+                item = _toast_queue.get_nowait()
+                name, previous = item if isinstance(item, tuple) else (item, None)
+                toast_manager.show(name, previous)
         except queue.Empty:
             pass
         except Exception as e:
@@ -2110,9 +2148,9 @@ def open_setting_window(prefill=None):
             log_error("test_switch", e)
             tk.messagebox.showerror(L("Error", "エラー"), L(f"Switch failed: {e}", f"切り替えに失敗しました: {e}"))
             return
-        current_default = target_display_name
+        previous, current_default = current_default, target_display_name
         refresh_indicator()
-        settings_toast.show(target_display_name)
+        settings_toast.show(target_display_name, previous)
 
     test_button = ctk.CTkButton(
         now_card, text=L("Test switch", "テスト切り替え"), command=on_test_switch,
