@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import keyboard
 import tkinter as tk
@@ -83,6 +84,10 @@ THEME_PALETTES = {
         "COLOR_TEXT_FAINT": "#9a9aa3",
     },
 }
+# CustomTkinterの(ライト, ダーク)の組。設定画面のウィジェットに渡すと、
+# set_appearance_mode()で開いたまま即座に色が切り替わる。
+THEME_TUPLES = {k: (THEME_PALETTES["light"][k], THEME_PALETTES["dark"][k])
+                for k in THEME_PALETTES["dark"]}
 THEME_CHOICES = ("light", "dark", "system")  # 保存する値。systemは「デバイスに合わせる」
 THEME = "system"
 EFFECTIVE_THEME = "dark"
@@ -98,6 +103,14 @@ def _device_prefers_dark():
         return value == 0
     except Exception:
         return True
+
+
+def _res(color):
+    """(ライト, ダーク)の組なら今のテーマの1色に直す。素のtkウィジェットや
+    Canvasは組を受け取れないので、それらに渡す時に使う。"""
+    if isinstance(color, tuple):
+        return color[1] if EFFECTIVE_THEME == "dark" else color[0]
+    return color
 
 
 def apply_theme(choice):
@@ -260,8 +273,8 @@ def set_default_device_all_roles(target_id):
     各ロールのSetDefaultEndpoint呼び出しは1回あたり数十ms かかる(COM
     オブジェクトの生成コストではなく、Windows Audioサービス側の処理自体が
     重い)ことが実測でわかったため、逐次3回呼ぶと切り替えの体感遅延が目立つ。
-    通信ロールを先に設定してから、残り2つを別スレッド(別COMアパートメント)で
-    並列に呼び、合計の実時間を縮める。"""
+    各ロールを別スレッド(別COMアパートメント)で並列に呼び、合計の実時間を
+    縮める。"""
     errors = []
 
     def _set_role(role):
@@ -276,20 +289,12 @@ def set_default_device_all_roles(target_id):
         finally:
             comtypes.CoUninitialize()
 
-    # 通信ロールを最初に1つだけ設定し、終わってから残りの2つを並列に設定する。
-    # Discordの「Default」は既定の通信デバイスを見るが、変更通知を受けた瞬間に
-    # 値を読み直す。3つを同時に投げると、先に届いた別ロールの通知で読み直した
-    # 時点では通信デバイスがまだ古いままのことがあり、Discordだけ切り替わらない。
-    # 通信を先に確定させておけば、どの通知で読み直しても新しい値になる。
-    def _run(roles):
-        threads = [threading.Thread(target=_set_role, args=(role,)) for role in roles]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-    _run((ERole.eCommunications,))
-    _run((ERole.eConsole, ERole.eMultimedia))
+    threads = [threading.Thread(target=_set_role, args=(role,))
+               for role in (ERole.eConsole, ERole.eMultimedia, ERole.eCommunications)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
     if errors:
         raise errors[0]
 
@@ -606,6 +611,9 @@ class _ToastManager:
         アプリモードの切り替えが、再起動なしで次の通知から反映される。"""
         try:
             apply_theme(self.theme_source())
+            if self.theme_source is load_theme:
+                global LANG
+                LANG = load_language()  # 常駐側は、設定で変えた言語も次の通知から反映する
         except Exception as e:
             log_error("toast_refresh_theme", e)
 
@@ -1342,6 +1350,25 @@ def _write_update_notice(latest_tag, notes):
         log_error("write_update_notice", e)
 
 
+def pick_release_notes(notes):
+    """リリースノートから今の言語の分を選ぶ。形式は、英語の本文の後に
+    `<!-- ja -->` だけの行を置き、その後ろに日本語を続ける。目印が無ければ
+    そのまま返す。日本語側が空なら英語にする。インストール手順の節は、更新
+    した後に見せても意味がないので外す。"""
+    text = notes or ""
+    parts = re.split(r"(?m)^[ \t]*<!--[ \t]*ja[ \t]*-->[ \t]*$", text, maxsplit=1)
+    if len(parts) == 2:
+        en, ja = parts
+        text = ja if (LANG == "ja" and ja.strip()) else en
+    out, skip = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            skip = line[3:].strip().lower() in ("install", "インストール")
+        if not skip:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
 def _read_pending_update_notice():
     """起動時に一度だけ呼ぶ。前回の更新時に書き残されたUPDATE_NOTICE_FILEが
     あれば(version, notes)を返してすぐ削除する(次回からは出さない)。無ければ
@@ -1361,7 +1388,7 @@ def _read_pending_update_notice():
         pass
     if not notice:
         return None
-    return notice.get("version", ""), notice.get("notes", "")
+    return notice.get("version", ""), pick_release_notes(notice.get("notes", ""))
 
 
 def _download_and_launch_installer(installer_url, release_url, latest_tag="", notes=""):
@@ -1593,6 +1620,21 @@ def open_setting_window(prefill=None):
     2重起動防止・ハイブリッドスタートアップ自動生成付き設定UI。
     A/B SWITCH(既存のA/Bトグル)とMulti-Device(3台以上から選ぶオーバーレイ)を
     タブで分けている。ひとつの画面に全部詰め込むとごちゃつくため。"""
+    # この画面の中では色を(ライト, ダーク)の組として扱う。CustomTkinterの部品は
+    # 組を受け取り、テーマを変えると開いたまま即座に色が切り替わる。素のtk部品
+    # (Canvasなど)に渡す所だけ _res() で今のテーマの1色に直す。
+    COLOR_BG = THEME_TUPLES["COLOR_BG"]
+    COLOR_PANEL = THEME_TUPLES["COLOR_PANEL"]
+    COLOR_INPUT = THEME_TUPLES["COLOR_INPUT"]
+    COLOR_BORDER = THEME_TUPLES["COLOR_BORDER"]
+    COLOR_ACCENT = THEME_TUPLES["COLOR_ACCENT"]
+    COLOR_ACCENT_HOVER = THEME_TUPLES["COLOR_ACCENT_HOVER"]
+    COLOR_ACCENT_DIM = THEME_TUPLES["COLOR_ACCENT_DIM"]
+    COLOR_ON_ACCENT = THEME_TUPLES["COLOR_ON_ACCENT"]
+    COLOR_TEXT_MAIN = THEME_TUPLES["COLOR_TEXT_MAIN"]
+    COLOR_TEXT_SUB = THEME_TUPLES["COLOR_TEXT_SUB"]
+    COLOR_TEXT_FAINT = THEME_TUPLES["COLOR_TEXT_FAINT"]
+
     import customtkinter as ctk  # 設定画面を開く時だけ読み込む（バックグラウンド常駐時は不要なため）
 
     is_first_run = not os.path.exists(CONFIG_FILE) and prefill is None
@@ -1656,10 +1698,10 @@ def open_setting_window(prefill=None):
 
         header = ctk.CTkFrame(overlay, fg_color="transparent")
         header.pack(fill="x", padx=28, pady=(26, 6))
-        head_icon = tk.Canvas(header, width=44, height=44, bg=COLOR_PANEL, highlightthickness=0)
+        head_icon = tk.Canvas(header, width=44, height=44, bg=_res(COLOR_PANEL), highlightthickness=0)
         head_icon.pack(side="left", padx=(0, 14))
-        _rounded_rect(head_icon, 0, 0, 44, 44, 12, fill=COLOR_INPUT, outline="")
-        draw_headphones(head_icon, 22, 22, 28, COLOR_ACCENT)
+        _rounded_rect(head_icon, 0, 0, 44, 44, 12, fill=_res(COLOR_INPUT), outline="")
+        draw_headphones(head_icon, 22, 22, 28, _res(COLOR_ACCENT))
         head_text = ctk.CTkFrame(header, fg_color="transparent")
         head_text.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(head_text, text=L("✓ Updated", "✓ アップデートしました"), font=F(9, "bold"),
@@ -1829,9 +1871,14 @@ def open_setting_window(prefill=None):
 
     brand = ctk.CTkFrame(sidebar, fg_color="transparent")
     brand.pack(fill="x", padx=16, pady=(20, 14))
-    logo = tk.Canvas(brand, width=28, height=28, bg=COLOR_PANEL, highlightthickness=0)
+    logo = tk.Canvas(brand, width=28, height=28, bg=_res(COLOR_PANEL), highlightthickness=0)
     logo.pack(side="left", padx=(0, 8))
-    draw_headphones(logo, 14, 14, 24, COLOR_ACCENT)
+    draw_headphones(logo, 14, 14, 24, _res(COLOR_ACCENT))
+
+    def redraw_logo():
+        logo.configure(bg=_res(COLOR_PANEL))
+        logo.delete("all")
+        draw_headphones(logo, 14, 14, 24, _res(COLOR_ACCENT))
     ctk.CTkLabel(brand, text="AudioSwitcher", font=F(12, "bold"), text_color=COLOR_TEXT_MAIN,
                  anchor="w").pack(side="left")
 
@@ -1929,13 +1976,30 @@ def open_setting_window(prefill=None):
     THEME_LABELS = {"light": L("Light", "ライト"), "dark": L("Dark", "ダーク"),
                     "system": L("Match device", "デバイスに合わせる")}
 
+    def apply_theme_live(choice):
+        """画面を作り直さず、開いたまま配色を切り替える"""
+        guide = getattr(show_onboarding, "_open", None)
+        if guide:
+            guide["close"]()
+        save_theme(choice)
+        ctk.set_appearance_mode(EFFECTIVE_THEME)
+        redraw_logo()
+
+    def watch_device_theme():
+        """「デバイスに合わせる」の時、Windowsのアプリモードが変わったら追従する"""
+        if THEME == "system":
+            now = "dark" if _device_prefers_dark() else "light"
+            if now != EFFECTIVE_THEME:
+                apply_theme("system")
+                ctk.set_appearance_mode(EFFECTIVE_THEME)
+                redraw_logo()
+        root.after(2000, watch_device_theme)
+
     def on_theme_change(label):
         choice = next(k for k, v in THEME_LABELS.items() if v == label)
         if choice == THEME:
             return
-        reopen["prefill"] = reopen_prefill()
-        save_theme(choice)
-        root.destroy()
+        apply_theme_live(choice)
 
     theme_switch = ctk.CTkSegmentedButton(
         theme_row, values=list(THEME_LABELS.values()), command=on_theme_change,
@@ -2410,9 +2474,9 @@ def open_setting_window(prefill=None):
             return int(round(v * scale))
 
         wiz = {"step": 0, "token": 0, "ring_rect": None}
-        ring = [tk.Frame(root, bg=COLOR_ACCENT) for _ in range(4)]
+        ring = [tk.Frame(root, bg=_res(COLOR_ACCENT)) for _ in range(4)]
         CW, CH = 276, 132
-        card = tk.Frame(root, bg=COLOR_PANEL, highlightthickness=1, highlightbackground=COLOR_BORDER,
+        card = tk.Frame(root, bg=_res(COLOR_PANEL), highlightthickness=1, highlightbackground=_res(COLOR_BORDER),
                         width=px(CW), height=px(CH))
         card.pack_propagate(False)
         title_label = ctk.CTkLabel(card, text="", font=F(11, "bold"), text_color=COLOR_TEXT_MAIN, anchor="w")
@@ -2420,9 +2484,9 @@ def open_setting_window(prefill=None):
         body_label = ctk.CTkLabel(card, text="", font=FONT_BODY, text_color=COLOR_TEXT_SUB, anchor="nw",
                                   justify="left", width=CW - 28, wraplength=px(CW - 28))
         body_label.pack(fill="both", expand=True, padx=14, pady=(2, 0))
-        foot = tk.Frame(card, bg=COLOR_PANEL)
+        foot = tk.Frame(card, bg=_res(COLOR_PANEL))
         foot.pack(fill="x", padx=12, pady=(0, 10))
-        dots = tk.Canvas(foot, width=px(56), height=px(12), bg=COLOR_PANEL, highlightthickness=0)
+        dots = tk.Canvas(foot, width=px(56), height=px(12), bg=_res(COLOR_PANEL), highlightthickness=0)
         dots.pack(side="left")
         btn_next = ctk.CTkButton(foot, text="", width=64, height=28, corner_radius=8, font=FONT_LABEL,
                                  fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
@@ -2437,12 +2501,12 @@ def open_setting_window(prefill=None):
                                  text_color=COLOR_TEXT_FAINT, command=lambda: close_wizard())
         btn_skip.place(relx=1.0, x=-8, y=8, anchor="ne")
 
-        toast = tk.Frame(root, bg=COLOR_PANEL, highlightthickness=2, highlightbackground=COLOR_ACCENT,
+        toast = tk.Frame(root, bg=_res(COLOR_PANEL), highlightthickness=2, highlightbackground=_res(COLOR_ACCENT),
                          width=px(250), height=px(64))
         toast.pack_propagate(False)
         ctk.CTkLabel(toast, text="B", width=30, height=30, corner_radius=15, fg_color=COLOR_ACCENT,
                      text_color=COLOR_ON_ACCENT, font=F(11, "bold")).pack(side="left", padx=(12, 10))
-        tbox = tk.Frame(toast, bg=COLOR_PANEL)
+        tbox = tk.Frame(toast, bg=_res(COLOR_PANEL))
         tbox.pack(side="left")
         ctk.CTkLabel(tbox, text=L("Output switched", "出力を切り替えました"), font=FONT_SMALL,
                      text_color=COLOR_TEXT_SUB, anchor="w", height=16).pack(anchor="w")
@@ -2558,7 +2622,7 @@ def open_setting_window(prefill=None):
                 cx = px(6 + i * 11)
                 r = px(3.5 if on else 2.5)
                 dots.create_oval(cx - r, px(6) - r, cx + r, px(6) + r,
-                                 fill=(COLOR_ACCENT if on else COLOR_BORDER), outline="")
+                                 fill=_res(COLOR_ACCENT if on else COLOR_BORDER), outline="")
 
         def close_wizard():
             wiz["token"] += 1
@@ -2603,10 +2667,11 @@ def open_setting_window(prefill=None):
                 play()
 
         root.bind("<Escape>", lambda e: close_wizard() if show_onboarding._open else None)
-        show_onboarding._open = {"lift": lambda: card.lift()}
+        show_onboarding._open = {"lift": lambda: card.lift(), "close": close_wizard}
         root.update()
         play()
 
+    root.after(2000, watch_device_theme)
     if is_first_run:
         show_onboarding()
     if prefill and prefill.get("tab") == "settings":
