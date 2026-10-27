@@ -632,11 +632,12 @@ class _ToastManager:
         except Exception as e:
             log_error("toast_refresh_theme", e)
 
-    def _fit_text(self, text, width):
-        """幅に収まらない文字を「…」で切る(前のデバイス名用)"""
-        if self._small_font.measure(text) <= width:
+    def _fit_text(self, text, width, font=None):
+        """幅に収まらない文字を「…」で切る"""
+        font = font or self._small_font
+        if font.measure(text) <= width:
             return text
-        while text and self._small_font.measure(text + "…") > width:
+        while text and font.measure(text + "…") > width:
             text = text[:-1]
         return text + "…"
 
@@ -668,8 +669,14 @@ class _ToastManager:
             # 上へ押し上げられて薄くなり、切り替え先が下から入ってくる(_animate_swap)。
             prev_y, new_y = 21, 42
             prev_dot = canvas.create_oval(dot_x - 4, new_y - 4, dot_x + 4, new_y + 4, fill=COLOR_ACCENT, outline="")
-            prev_text = canvas.create_text(text_x, new_y, anchor="w", text=self._fit_text(previous, text_w),
+            prev_text = canvas.create_text(text_x, new_y, anchor="w",
+                                           text=self._fit_text(previous, text_w, self._device_font),
                                            fill=COLOR_TEXT_MAIN, font=self.DEVICE_FONT)
+            # 動いている間の切り替え先は、同じCanvasに直接描く。専用の小さなCanvas(下の
+            # 窓)を重ねると、その背景が前のデバイスの文字を隠して切れて見えるため。
+            new_text = canvas.create_text(text_x, new_y, anchor="w",
+                                          text=self._fit_text(device_name, text_w, self._device_font),
+                                          fill=COLOR_PANEL, font=self.DEVICE_FONT)
             new_dot = canvas.create_oval(dot_x - 4, new_y - 4, dot_x + 4, new_y + 4, fill=COLOR_PANEL, outline="")
         else:
             new_y = self.HEIGHT / 2
@@ -685,18 +692,27 @@ class _ToastManager:
         text_canvas.bind("<Button-1>", lambda e: self.on_click() if self.on_click else None)
         win_id = canvas.create_window(text_x, new_y, anchor="w", window=text_canvas)
         text_item = text_canvas.create_text(0, 11, anchor="w", text=device_name,
-                                            fill=(COLOR_PANEL if swap else COLOR_TEXT_MAIN), font=self.DEVICE_FONT)
+                                            fill=COLOR_TEXT_MAIN, font=self.DEVICE_FONT)
+        if swap:
+            canvas.itemconfigure(win_id, state="hidden")
         text_width = self._device_font.measure(device_name)
 
         def start_marquee():
             if text_width > text_w:
                 self._start_marquee(text_item, text_width, 0, text_w, text_canvas, 11)
 
+        def finish_swap():
+            # 動きが終わったら、長い名前だけ、往復スクロールできる窓に切り替える
+            if text_width > text_w:
+                canvas.delete(new_text)
+                canvas.itemconfigure(win_id, state="normal")
+            start_marquee()
+
         if swap:
-            self._animate_swap(dict(canvas=canvas, text_canvas=text_canvas, win_id=win_id, text_item=text_item,
+            self._animate_swap(dict(canvas=canvas, win_id=win_id, new_text=new_text,
                                     prev_dot=prev_dot, prev_text=prev_text, new_dot=new_dot,
                                     dot_x=dot_x, text_x=text_x, prev_y=prev_y, new_y=new_y),
-                               start_marquee)
+                               finish_swap)
         else:
             start_marquee()
 
@@ -721,7 +737,7 @@ class _ToastManager:
         if getattr(self, "_swap_job", None):
             self.root.after_cancel(self._swap_job)
             self._swap_job = None
-        canvas, tc = w["canvas"], w["text_canvas"]
+        canvas = w["canvas"]
         HOLD, PUSH, RISE = 0.65, 0.45, 0.45
         RISE_AT = HOLD + PUSH * 0.6
         END = RISE_AT + RISE
@@ -752,8 +768,8 @@ class _ToastManager:
                 y_new = w["new_y"] + 14 * (1 - r)
                 canvas.coords(w["new_dot"], w["dot_x"] - 4, y_new - 4, w["dot_x"] + 4, y_new + 4)
                 canvas.itemconfigure(w["new_dot"], fill=_mix_color(COLOR_PANEL, COLOR_ACCENT, r))
-                canvas.coords(w["win_id"], w["text_x"], y_new)
-                tc.itemconfigure(w["text_item"], fill=_mix_color(COLOR_PANEL, COLOR_TEXT_MAIN, r))
+                canvas.coords(w["new_text"], w["text_x"], y_new)
+                canvas.itemconfigure(w["new_text"], fill=_mix_color(COLOR_PANEL, COLOR_TEXT_MAIN, r))
                 if el < END:
                     delay = max(1, 16 - int((time.time() - started) * 1000))
                     self._swap_job = self.root.after(delay, frame)
