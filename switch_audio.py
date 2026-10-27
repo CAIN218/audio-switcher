@@ -40,7 +40,7 @@ ICON_PATH = os.path.join(BASE_DIR, "app_icon.ico")
 if not os.path.exists(ICON_PATH) and hasattr(sys, "_MEIPASS"):
     ICON_PATH = os.path.join(sys._MEIPASS, "app_icon.ico")
 
-__version__ = "1.8.2"
+__version__ = "1.8.3"
 GITHUB_REPO = "CAIN218/audio-switcher"
 
 DEFAULT_OVERLAY_HOTKEY = "ctrl+alt+s"
@@ -260,8 +260,8 @@ def set_default_device_all_roles(target_id):
     各ロールのSetDefaultEndpoint呼び出しは1回あたり数十ms かかる(COM
     オブジェクトの生成コストではなく、Windows Audioサービス側の処理自体が
     重い)ことが実測でわかったため、逐次3回呼ぶと切り替えの体感遅延が目立つ。
-    各ロールを別スレッド(別COMアパートメント)で並列に呼び、合計の実時間を
-    縮める。"""
+    通信ロールを先に設定してから、残り2つを別スレッド(別COMアパートメント)で
+    並列に呼び、合計の実時間を縮める。"""
     errors = []
 
     def _set_role(role):
@@ -276,12 +276,20 @@ def set_default_device_all_roles(target_id):
         finally:
             comtypes.CoUninitialize()
 
-    threads = [threading.Thread(target=_set_role, args=(role,))
-               for role in (ERole.eConsole, ERole.eMultimedia, ERole.eCommunications)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    # 通信ロールを最初に1つだけ設定し、終わってから残りの2つを並列に設定する。
+    # Discordの「Default」は既定の通信デバイスを見るが、変更通知を受けた瞬間に
+    # 値を読み直す。3つを同時に投げると、先に届いた別ロールの通知で読み直した
+    # 時点では通信デバイスがまだ古いままのことがあり、Discordだけ切り替わらない。
+    # 通信を先に確定させておけば、どの通知で読み直しても新しい値になる。
+    def _run(roles):
+        threads = [threading.Thread(target=_set_role, args=(role,)) for role in roles]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    _run((ERole.eCommunications,))
+    _run((ERole.eConsole, ERole.eMultimedia))
     if errors:
         raise errors[0]
 
