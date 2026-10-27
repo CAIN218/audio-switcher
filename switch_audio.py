@@ -705,7 +705,7 @@ class _ToastManager:
 
         self.on_click = None
         self._update_subtitle_id = None
-        self._hold_ms = 2800 if swap else 2300
+        self._hold_ms = 3000 if swap else 2300
         self._place_bottom_right()
         self.window.deiconify()
         self._place_bottom_right()
@@ -714,22 +714,32 @@ class _ToastManager:
 
     def _animate_swap(self, w, on_done):
         """前のデバイスを上へ押し上げて薄くし、切り替え先を下から入れる。
+        時間を基準に進めるので、描画が遅れてコマが落ちても、各段階の長さは変わらない。
+        流れ(表示開始から): 前のデバイスを0.65秒見せる → 0.45秒かけて上へ押されて
+        薄くなる → その6割が進んだ所から0.45秒かけて切り替え先が入る(約1.4秒で完了)。
         Canvasは透明度を持てないので、背景色との間で色を混ぜてフェードに見せる。"""
         if getattr(self, "_swap_job", None):
             self.root.after_cancel(self._swap_job)
             self._swap_job = None
         canvas, tc = w["canvas"], w["text_canvas"]
-        START_MS, DUR_MS, STEP_MS = 100, 240, 16
-        steps = DUR_MS // STEP_MS
+        HOLD, PUSH, RISE = 0.65, 0.45, 0.45
+        RISE_AT = HOLD + PUSH * 0.6
+        END = RISE_AT + RISE
+        t0 = time.time()
         small_set = {"v": False}
 
-        def frame(i):
+        def ease(x):
+            x = min(1.0, max(0.0, x))
+            return 4 * x ** 3 if x < 0.5 else 1 - (-2 * x + 2) ** 3 / 2
+
+        def frame():
             self._swap_job = None
+            started = time.time()
             try:
                 if self.window is None or not canvas.winfo_exists():
                     return
-                t = min(1.0, i / steps)
-                e = 1 - (1 - t) ** 3
+                el = started - t0
+                e = ease((el - HOLD) / PUSH)
                 y_prev = w["new_y"] + (w["prev_y"] - w["new_y"]) * e
                 canvas.coords(w["prev_dot"], w["dot_x"] - 4, y_prev - 4, w["dot_x"] + 4, y_prev + 4)
                 canvas.coords(w["prev_text"], w["text_x"], y_prev)
@@ -738,19 +748,21 @@ class _ToastManager:
                 if e >= 0.5 and not small_set["v"]:
                     small_set["v"] = True
                     canvas.itemconfigure(w["prev_text"], font=F(9))
-                y_new = w["new_y"] + 12 * (1 - e)
+                r = ease((el - RISE_AT) / RISE)
+                y_new = w["new_y"] + 14 * (1 - r)
                 canvas.coords(w["new_dot"], w["dot_x"] - 4, y_new - 4, w["dot_x"] + 4, y_new + 4)
-                canvas.itemconfigure(w["new_dot"], fill=_mix_color(COLOR_PANEL, COLOR_ACCENT, e))
+                canvas.itemconfigure(w["new_dot"], fill=_mix_color(COLOR_PANEL, COLOR_ACCENT, r))
                 canvas.coords(w["win_id"], w["text_x"], y_new)
-                tc.itemconfigure(w["text_item"], fill=_mix_color(COLOR_PANEL, COLOR_TEXT_MAIN, e))
-                if i < steps:
-                    self._swap_job = self.root.after(STEP_MS, lambda: frame(i + 1))
+                tc.itemconfigure(w["text_item"], fill=_mix_color(COLOR_PANEL, COLOR_TEXT_MAIN, r))
+                if el < END:
+                    delay = max(1, 16 - int((time.time() - started) * 1000))
+                    self._swap_job = self.root.after(delay, frame)
                 else:
                     on_done()
             except Exception as ex:
                 log_error("animate_swap", ex)
 
-        self._swap_job = self.root.after(START_MS, lambda: frame(0))
+        self._swap_job = self.root.after(16, frame)
 
     TEXT_X = 74
     SUB_Y = 27
