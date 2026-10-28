@@ -1404,7 +1404,10 @@ def _fetch_latest_release_info():
     with urllib.request.urlopen(req, timeout=5) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     latest_tag = data.get("tag_name", "")
-    release_url = data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
+    release_url = data.get("html_url") or ""
+    # webbrowser.openに渡すので、このリポジトリのGitHubページ以外は使わない。
+    if not release_url.lower().startswith(f"https://github.com/{GITHUB_REPO.lower()}/"):
+        release_url = f"https://github.com/{GITHUB_REPO}/releases/latest"
     notes = data.get("body") or ""
     installer_url = None
     # SHA256SUMSが無いリリースは自動インストールせず、リリースページを開く
